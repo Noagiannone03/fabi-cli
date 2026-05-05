@@ -1,14 +1,16 @@
 import { Prompt, type PromptRef } from "@tui/component/prompt"
-import { createEffect, createSignal } from "solid-js"
+import { createEffect, createMemo, createSignal } from "solid-js"
 import { Logo } from "../component/logo"
 import { useProject } from "../context/project"
 import { useSync } from "../context/sync"
+import { useTheme } from "@tui/context/theme"
 import { Toast } from "../ui/toast"
 import { useArgs } from "../context/args"
 import { useRouteData } from "@tui/context/route"
 import { usePromptRef } from "../context/prompt"
 import { useLocal } from "../context/local"
 import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
+import { useSwarmRegistry } from "../component/use-swarm-registry"
 
 let once = false
 const placeholder = {
@@ -24,7 +26,20 @@ export function Home() {
   const [ref, setRef] = createSignal<PromptRef | undefined>()
   const args = useArgs()
   const local = useLocal()
+  const { theme } = useTheme()
+  const swarm = useSwarmRegistry()
   let sent = false
+
+  // Petit indicateur live sous le logo : nombre total de peers + swarms online
+  const swarmStatus = createMemo(() => {
+    const list = swarm.swarms()
+    if (swarm.loading() && list.length === 0) return "discovering swarm…"
+    if (swarm.error() && list.length === 0) return "registry offline"
+    const online = list.filter((s) => s.status === "online")
+    if (online.length === 0) return "no swarm online"
+    const peers = online.reduce((acc, s) => acc + s.peers, 0)
+    return `${online.length} swarm${online.length > 1 ? "s" : ""} · ${peers} peer${peers === 1 ? "" : "s"} live`
+  })
 
   const bind = (r: PromptRef | undefined) => {
     setRef(r)
@@ -57,10 +72,18 @@ export function Home() {
       <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
         <box flexGrow={1} minHeight={0} />
         <box height={4} minHeight={0} flexShrink={1} />
-        <box flexShrink={0}>
+        <box flexShrink={0} alignItems="center">
           <TuiPluginRuntime.Slot name="home_logo" mode="replace">
             <Logo />
           </TuiPluginRuntime.Slot>
+          <box paddingTop={1} flexDirection="row" gap={1}>
+            <text fg={theme.textMuted}>distributed AI ·</text>
+            <text fg={theme.primary}>powered by the swarm</text>
+          </box>
+          <box paddingTop={1} flexDirection="row" gap={1} alignItems="center">
+            <text fg={theme.primary}>◆</text>
+            <text fg={theme.textMuted}>{swarmStatus()}</text>
+          </box>
         </box>
         <box height={1} minHeight={0} flexShrink={1} />
         <box width="100%" maxWidth={75} zIndex={1000} paddingTop={1} flexShrink={0}>

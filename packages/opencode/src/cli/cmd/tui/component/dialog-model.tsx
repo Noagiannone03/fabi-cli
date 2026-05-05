@@ -9,6 +9,20 @@ import { DialogVariant } from "./dialog-variant"
 import { useKeybind } from "../context/keybind"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
+import { useSwarmRegistry } from "./use-swarm-registry"
+import { SWARM_PROVIDER_ID } from "@/swarm/defaults"
+import type { RegistrySwarm } from "@/swarm/registry"
+
+// Affiche un footer compact "● 3 peers · 24GB" pour les modèles Fabi (provider
+// fabi). Si le swarm est inconnu du registry on retombe sur "● —" qui signale
+// "registry pas encore résolu / injoignable" sans casser la mise en page.
+function swarmFooter(entry: RegistrySwarm | undefined): string {
+  if (!entry) return "● —"
+  const dot = entry.status === "online" ? "●" : entry.status === "offline" ? "○" : "◌"
+  if (!entry.peers) return `${dot} 0 peer`
+  const vram = entry.totalVramGb > 0 ? ` · ${entry.totalVramGb}GB` : ""
+  return `${dot} ${entry.peers} peer${entry.peers > 1 ? "s" : ""}${vram}`
+}
 
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
@@ -19,6 +33,7 @@ export function DialogModel(props: { providerID?: string }) {
 
   const connected = useConnected()
   const providers = createDialogProviderOptions()
+  const swarmRegistry = useSwarmRegistry()
 
   const showExtra = createMemo(() => connected() && !props.providerID)
 
@@ -35,6 +50,7 @@ export function DialogModel(props: { providerID?: string }) {
         if (!provider) return []
         const model = provider.models[item.modelID]
         if (!model) return []
+        const swarmEntry = provider.id === SWARM_PROVIDER_ID ? swarmRegistry.byModel().get(model.id) : undefined
         return [
           {
             key: item,
@@ -43,7 +59,12 @@ export function DialogModel(props: { providerID?: string }) {
             description: provider.name,
             category,
             disabled: provider.id === "opencode" && model.id.includes("-nano"),
-            footer: model.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
+            footer:
+              provider.id === SWARM_PROVIDER_ID
+                ? swarmFooter(swarmEntry)
+                : model.cost?.input === 0 && provider.id === "opencode"
+                  ? "Free"
+                  : undefined,
             onSelect: () => {
               onSelect(provider.id, model.id)
             },
@@ -72,19 +93,28 @@ export function DialogModel(props: { providerID?: string }) {
           entries(),
           filter(([_, info]) => info.status !== "deprecated"),
           filter(([_, info]) => (props.providerID ? info.providerID === props.providerID : true)),
-          map(([model, info]) => ({
-            value: { providerID: provider.id, modelID: model },
-            title: info.name ?? model,
-            description: favorites.some((item) => item.providerID === provider.id && item.modelID === model)
-              ? "(Favorite)"
-              : undefined,
-            category: connected() ? provider.name : undefined,
-            disabled: provider.id === "opencode" && model.includes("-nano"),
-            footer: info.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
-            onSelect() {
-              onSelect(provider.id, model)
-            },
-          })),
+          map(([model, info]) => {
+            const swarmEntry =
+              provider.id === SWARM_PROVIDER_ID ? swarmRegistry.byModel().get(model) : undefined
+            return {
+              value: { providerID: provider.id, modelID: model },
+              title: info.name ?? model,
+              description: favorites.some((item) => item.providerID === provider.id && item.modelID === model)
+                ? "(Favorite)"
+                : undefined,
+              category: connected() ? provider.name : undefined,
+              disabled: provider.id === "opencode" && model.includes("-nano"),
+              footer:
+                provider.id === SWARM_PROVIDER_ID
+                  ? swarmFooter(swarmEntry)
+                  : info.cost?.input === 0 && provider.id === "opencode"
+                    ? "Free"
+                    : undefined,
+              onSelect() {
+                onSelect(provider.id, model)
+              },
+            }
+          }),
           filter((x) => {
             if (!showSections) return true
             if (favorites.some((item) => item.providerID === x.value.providerID && item.modelID === x.value.modelID))

@@ -22,11 +22,16 @@ export function DialogAlert(props: DialogAlertProps) {
     }
   })
   return (
-    <box paddingLeft={2} paddingRight={2} gap={1}>
-      <box flexDirection="row" justifyContent="space-between">
-        <text attributes={TextAttributes.BOLD} fg={theme.text}>
-          {props.title}
-        </text>
+    <box paddingLeft={3} paddingRight={3} gap={1}>
+      <box flexDirection="row" justifyContent="space-between" alignItems="center">
+        <box flexDirection="row" gap={1}>
+          <text fg={theme.primary} attributes={TextAttributes.BOLD}>
+            ▍
+          </text>
+          <text attributes={TextAttributes.BOLD} fg={theme.text}>
+            {props.title}
+          </text>
+        </box>
         <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
           esc
         </text>

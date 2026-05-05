@@ -54,6 +54,21 @@ export function Dialog(
         width={width()}
         maxWidth={dimensions().width - 2}
         backgroundColor={theme.backgroundPanel}
+        border
+        borderColor={theme.primary}
+        customBorderChars={{
+          topLeft: "╭",
+          topRight: "╮",
+          bottomLeft: "╰",
+          bottomRight: "╯",
+          horizontal: "─",
+          vertical: "│",
+          bottomT: "─",
+          topT: "─",
+          cross: "┼",
+          leftT: "│",
+          rightT: "│",
+        }}
         paddingTop={1}
       >
         {props.children}

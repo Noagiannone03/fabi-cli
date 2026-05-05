@@ -85,19 +85,67 @@ export type ThemeJson = {
   }
 }
 
+// Fabi brand theme — palette officielle, override ciblé d'opencode.
+//
+// Primary  = orange Fabi (#EC5B2B), couleur du logo et des accents UX.
+// Accent   = crème (#FFF7F1) pour faire ressortir les titres/headings.
+// Secondary= bleu doux pour les liens & diffs (lisible sur orange).
+//
+// Le but : que l'UI soit immédiatement reconnaissable comme "Fabi" et pas
+// comme du opencode rebrandé. Si tu retouches, garde un contraste AA sur
+// le texte (orange vif sur fond noir ⇒ ne pas l'utiliser pour du texte long).
 const fabi = {
   ...opencode,
   $schema: "https://github.com/Noagiannone03/fabi",
   defs: {
     ...opencode.defs,
-    darkStep9: "#4fd6be",
-    darkStep10: "#80ffe4",
-    darkSecondary: "#7aa2ff",
-    darkAccent: "#ffcc66",
-    lightStep9: "#007f68",
-    lightStep10: "#006b58",
-    lightSecondary: "#345ecf",
-    lightAccent: "#9a6b00",
+    // Base sombre légèrement plus chaude que opencode
+    darkStep1: "#0b0807",
+    darkStep2: "#15100d",
+    darkStep3: "#1f1814",
+    darkStep4: "#2a2019",
+    darkStep5: "#352920",
+    darkStep6: "#403228",
+    darkStep7: "#4d3d30",
+    darkStep8: "#6b5343",
+    // Brand orange (primary + steps de hover)
+    darkStep9: "#EC5B2B",
+    darkStep10: "#FF7A4F",
+    darkStep11: "#a89488",
+    darkStep12: "#fff2e8",
+    darkSecondary: "#7AA8FF",
+    darkAccent: "#FFF7F1",
+    darkOrange: "#EC5B2B",
+    darkYellow: "#FFC58A",
+    // Light mode — papier crème
+    lightStep1: "#FFFBF7",
+    lightStep2: "#FFF6EE",
+    lightStep3: "#F8EDE2",
+    lightStep4: "#EFE2D2",
+    lightStep5: "#E5D5C2",
+    lightStep6: "#D4BFA8",
+    lightStep7: "#B89B7E",
+    lightStep8: "#8C6F54",
+    lightStep9: "#C94D24",
+    lightStep10: "#A23E1B",
+    lightStep11: "#6E5949",
+    lightStep12: "#1C140F",
+    lightSecondary: "#1F4FB8",
+    lightAccent: "#A23E1B",
+    lightOrange: "#C94D24",
+  },
+  theme: {
+    ...opencode.theme,
+    // Bordure légèrement teintée brand pour les panels actifs
+    border: { dark: "darkStep7", light: "lightStep7" },
+    borderActive: { dark: "darkStep9", light: "lightStep9" },
+    borderSubtle: { dark: "darkStep5", light: "lightStep5" },
+    // Texte sur sélection : noir/blanc selon contraste, défini explicitement
+    selectedListItemText: { dark: "#0b0807", light: "#FFFBF7" },
+    // Markdown: les titres en orange, le code en bleu doux pour briser la mono-couleur
+    markdownHeading: { dark: "darkStep9", light: "lightStep9" },
+    markdownStrong: { dark: "darkStep10", light: "lightStep9" },
+    markdownCode: { dark: "darkSecondary", light: "lightSecondary" },
   },
 } as ThemeJson
 

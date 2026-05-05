@@ -243,10 +243,15 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   return (
     <box gap={1} paddingBottom={1}>
       <box paddingLeft={4} paddingRight={4}>
-        <box flexDirection="row" justifyContent="space-between">
-          <text fg={theme.text} attributes={TextAttributes.BOLD}>
-            {props.title}
-          </text>
+        <box flexDirection="row" justifyContent="space-between" alignItems="center">
+          <box flexDirection="row" gap={1}>
+            <text fg={theme.primary} attributes={TextAttributes.BOLD}>
+              ▍
+            </text>
+            <text fg={theme.text} attributes={TextAttributes.BOLD}>
+              {props.title}
+            </text>
+          </box>
           <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
             esc
           </text>
@@ -298,13 +303,16 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
             {([category, options], index) => (
               <>
                 <Show when={category}>
-                  <box paddingTop={index() > 0 ? 1 : 0} paddingLeft={3}>
+                  <box paddingTop={index() > 0 ? 1 : 0} paddingLeft={3} flexDirection="row" gap={1}>
                     <Show
                       when={options[0]?.categoryView}
                       fallback={
-                        <text fg={theme.accent} attributes={TextAttributes.BOLD}>
-                          {category}
-                        </text>
+                        <>
+                          <text fg={theme.primary}>─</text>
+                          <text fg={theme.accent} attributes={TextAttributes.BOLD}>
+                            {category}
+                          </text>
+                        </>
                       }
                     >
                       {options[0]?.categoryView}
