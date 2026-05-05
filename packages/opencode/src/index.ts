@@ -39,6 +39,7 @@ import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
+import * as Swarm from "./swarm"
 
 const processMetadata = ensureProcessMetadata("main")
 
@@ -54,11 +55,119 @@ process.on("uncaughtException", (e) => {
   })
 })
 
+// Filet de sécurité : si une commande fait process.exit() direct (cas de la
+// TUI thread qui appelle process.exit(0) dans son handler), le finally global
+// ne s'exécute pas. Ce handler synchrone envoie au moins SIGTERM au worker
+// pour qu'aucun process GPU Parallax ne survive au binaire fabi.
+process.on("exit", () => {
+  Swarm.shutdownActiveSync()
+})
+
 const args = hideBin(process.argv)
+
+// ---------------------------------------------------------------------------
+// Affichage live des événements de boot du swarm.
+// On écrit sur stderr pour ne pas polluer le stdout d'une commande pipée.
+// Tag visible "[fabi swarm]" pour que l'utilisateur sache d'où ça vient.
+// ---------------------------------------------------------------------------
+function printSwarmEvent(event: Swarm.SwarmStartEvent, runtime: Swarm.SwarmRuntime): void {
+  const tag = UI.Style.TEXT_INFO_BOLD + "[fabi swarm]" + UI.Style.TEXT_NORMAL
+  const dim = UI.Style.TEXT_DIM
+  const ok = UI.Style.TEXT_SUCCESS
+  const warn = UI.Style.TEXT_WARNING
+  const reset = UI.Style.TEXT_NORMAL
+
+  const writeLine = (msg: string) => process.stderr.write(`${tag} ${msg}${reset}${EOL}`)
+
+  switch (event.kind) {
+    case "scheduler": {
+      if (event.info.reachable) {
+        writeLine(`${ok}scheduler joignable${reset} : ${event.url}`)
+        const parts: string[] = []
+        if (event.info.status) parts.push(`status=${event.info.status}`)
+        if (typeof event.info.nodeCount === "number") parts.push(`workers=${event.info.nodeCount}`)
+        if (event.info.model) parts.push(`model=${event.info.model}`)
+        if (parts.length) writeLine(`${dim}            ${parts.join("  ·  ")}`)
+      } else {
+        writeLine(`${warn}scheduler injoignable${reset} : ${event.url}`)
+        writeLine(`${dim}            (Fabi continue en mode dégradé — corrige le scheduler ou utilise un autre provider)`)
+      }
+      break
+    }
+    case "worker-disabled": {
+      writeLine(`${warn}worker swarm désactivé (--no-parallax) — mode dev, pas pour usage normal${reset}`)
+      break
+    }
+    case "worker": {
+      const s = event.status
+      switch (s.kind) {
+        case "starting":
+          writeLine(`${dim}démarrage du worker parallax (peer ${runtime.schedulerPeer})…${reset}`)
+          break
+        case "running":
+          writeLine(`${ok}worker parallax démarré${reset} (pid ${s.pid}) — tu contribues au swarm 🦦`)
+          break
+        case "missing-binary":
+          writeLine(`${warn}parallax non installé${reset} — lancement de l'installer interactif…`)
+          break
+        case "exited":
+          writeLine(`${warn}worker parallax arrêté${reset} (code=${s.code} signal=${s.signal ?? "-"})`)
+          break
+        case "error":
+          writeLine(`${warn}worker parallax : ${s.message}${reset}`)
+          break
+      }
+      break
+    }
+    case "installer-prompt": {
+      // L'installer va prendre la main sur stdout/stderr ; pas de tag ici
+      // pour ne pas bruiter l'UX du prompt.
+      break
+    }
+    case "installer-result": {
+      if (event.result.ok) {
+        writeLine(`${ok}runtime parallax prêt${reset} (${event.result.binPath})`)
+      } else {
+        writeLine(`${warn}install parallax non aboutie${reset} (${event.result.reason})`)
+        // Détail du message renvoyé par l'installer pour aider l'utilisateur.
+        writeLine(`${dim}            ${event.result.message}${reset}`)
+      }
+      break
+    }
+  }
+}
+
+// Message bloquant final quand Parallax est requis mais qu'on n'a pas pu
+// le démarrer (l'installer a déjà tourné en amont et expliqué la raison
+// précise de l'échec : user-declined, python-missing, pip-failed, ...).
+// Philosophie Fabi : "tu codes = tu contribues" (cf. README et ADR 002).
+function printParallaxRequiredMessage(reason: "missing-binary" | "spawn-failed"): void {
+  const danger = UI.Style.TEXT_DANGER_BOLD
+  const warn = UI.Style.TEXT_WARNING
+  const dim = UI.Style.TEXT_DIM
+  const reset = UI.Style.TEXT_NORMAL
+
+  const lines: string[] = [
+    "",
+    `${danger}❌ Fabi ne peut pas démarrer sans worker Parallax${reset}`,
+    "",
+    `${warn}Philosophie Fabi : tu utilises le swarm = tu y contribues.${reset}`,
+    `${dim}Pas de mode consommateur seul — sinon le swarm meurt sous le poids${reset}`,
+    `${dim}des utilisateurs qui ne donnent pas de compute en retour.${reset}`,
+    "",
+    reason === "spawn-failed"
+      ? `${dim}Le worker a refusé de démarrer même après installation. Logs au-dessus pour la cause.${reset}`
+      : `${dim}Relance ${reset}fabi${dim} quand tu seras prêt à installer Parallax.${reset}`,
+    "",
+    `${dim}Dev / contributeurs du fork uniquement : ${reset}--no-parallax${dim} skip le worker${reset}`,
+    "",
+  ]
+  for (const line of lines) process.stderr.write(line + EOL)
+}
 
 function show(out: string) {
   const text = out.trimStart()
-  if (!text.startsWith("opencode ")) {
+  if (!text.startsWith("fabi ")) {
     process.stderr.write(UI.logo() + EOL + EOL)
     process.stderr.write(text)
     return
@@ -68,7 +177,7 @@ function show(out: string) {
 
 const cli = yargs(args)
   .parserConfiguration({ "populate--": true })
-  .scriptName("opencode")
+  .scriptName("fabi")
   .wrap(100)
   .help("help", "show help")
   .alias("help", "h")
@@ -85,6 +194,24 @@ const cli = yargs(args)
   })
   .option("pure", {
     describe: "run without external plugins",
+    type: "boolean",
+  })
+  .option("parallax", {
+    describe:
+      "lance le worker parallax au boot (REQUIS en usage normal — --no-parallax est réservé aux devs du fork qui veulent skip Parallax)",
+    type: "boolean",
+    default: true,
+  })
+  .option("scheduler", {
+    describe: "URL HTTP du scheduler swarm Fabi (override la config)",
+    type: "string",
+  })
+  .option("scheduler-peer", {
+    describe: "PeerID Lattica du scheduler à passer à `parallax join -s`",
+    type: "string",
+  })
+  .option("swarm-verbose", {
+    describe: "forwarde stdout/stderr du worker parallax vers stderr",
     type: "boolean",
   })
   .middleware(async (opts) => {
@@ -107,8 +234,11 @@ const cli = yargs(args)
     process.env.AGENT = "1"
     process.env.OPENCODE = "1"
     process.env.OPENCODE_PID = String(process.pid)
+    // Markers Fabi en plus des markers OpenCode (compat upstream).
+    process.env.FABI = "1"
+    process.env.FABI_PID = String(process.pid)
 
-    Log.Default.info("opencode", {
+    Log.Default.info("fabi", {
       version: InstallationVersion,
       args: process.argv.slice(2),
       process_role: processMetadata.processRole,
@@ -150,6 +280,39 @@ const cli = yargs(args)
         }
       }
       process.stderr.write("Database migration complete." + EOL)
+    }
+  })
+  // Middleware swarm Fabi : démarre le worker parallax et ping le scheduler
+  // pour les commandes qui font de l'inférence (TUI default, run, serve).
+  // Toutes les erreurs sont absorbées : un swarm injoignable ou un binaire
+  // parallax absent ne doit jamais empêcher l'utilisateur d'utiliser fabi
+  // (fallback : mode consumer-only sur le scheduler distant).
+  .middleware(async (opts) => {
+    // Skip pour --help / --version / completion (pas d'inférence demandée).
+    if (opts.help || opts.version) return
+    const command = (opts._?.[0] as string | undefined) ?? undefined
+    if (!Swarm.shouldStartSwarm(command)) return
+
+    const runtime = Swarm.resolveSwarmRuntime({
+      schedulerUrl: opts.scheduler as string | undefined,
+      schedulerPeer: opts.schedulerPeer as string | undefined,
+      // yargs traite --no-parallax comme parallax: false (cf. .option ci-dessus).
+      noParallax: opts.parallax === false ? true : undefined,
+      verbose: opts.swarmVerbose === true ? true : undefined,
+    })
+
+    try {
+      await Swarm.startSwarm(runtime, (event) => printSwarmEvent(event, runtime))
+    } catch (err) {
+      // Worker Parallax requis mais absent → philosophie Fabi : pas de free-riding,
+      // on n'autorise pas la consommation du swarm sans contribution.
+      // L'utilisateur doit installer Parallax (ou utiliser --no-parallax en dev).
+      if (err instanceof Swarm.SwarmWorkerRequiredError) {
+        printParallaxRequiredMessage(err.reason)
+        process.exit(1)
+      }
+      // Autre erreur (réseau scheduler, race condition, ...) — log et continue.
+      Log.Default.warn("swarm boot failed", { error: errorMessage(err) })
     }
   })
   .usage("")
@@ -239,6 +402,13 @@ try {
   }
   process.exitCode = 1
 } finally {
+  // Tue le worker parallax avant de force-exit pour qu'aucun process GPU ne
+  // reste en arrière-plan. Tolère un échec — le SIGKILL après grace period
+  // garantit que rien ne survit.
+  await Swarm.shutdownActive().catch((err) => {
+    Log.Default.warn("swarm shutdown failed", { error: errorMessage(err) })
+  })
+
   // Some subprocesses don't react properly to SIGTERM and similar signals.
   // Most notably, some docker-container-based MCP servers don't handle such signals unless
   // run using `docker run --init`.

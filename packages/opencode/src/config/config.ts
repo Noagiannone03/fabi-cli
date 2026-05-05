@@ -41,8 +41,23 @@ import { ConfigServer } from "./server"
 import { ConfigSkills } from "./skills"
 import { ConfigVariable } from "./variable"
 import { Npm } from "@opencode-ai/core/npm"
+import { buildSwarmProvider, buildDefaultModelRef, SWARM_PROVIDER_ID } from "../swarm"
 
 const log = Log.create({ service: "config" })
+
+// Couche de défauts Fabi : provider swarm + modèle par défaut.
+// Mergée comme première couche dans loadInstanceState pour que :
+//   - sans aucune config user, `fabi/Qwen/Qwen3-Coder-30B-A3B-Instruct` soit dispo
+//   - n'importe quelle config user (global, project, OPENCODE_CONFIG) puisse
+//     surcharger ce default (changer de modèle, désactiver Fabi, etc.)
+function fabiBaseConfig(): Info {
+  const provider = buildSwarmProvider()
+  return {
+    provider: { [SWARM_PROVIDER_ID]: provider as any },
+    model: buildDefaultModelRef(),
+    small_model: buildDefaultModelRef(),
+  } as Info
+}
 
 // Custom merge function that concatenates array fields instead of replacing them
 // Keep remeda's deep conditional merge type out of hot config-loading paths; TS profiling showed it dominates here.
@@ -448,7 +463,10 @@ export const layer = Layer.effect(
       function* (ctx: InstanceContext) {
         const auth = yield* authSvc.all().pipe(Effect.orDie)
 
-        let result: Info = {}
+        // Pré-merge des défauts Fabi (provider swarm + modèle Qwen par défaut).
+        // Ils seront écrasés par n'importe quelle config user qui définit
+        // explicitement `provider.fabi`, `model`, ou `disabled_providers`.
+        let result: Info = mergeConfig({} as Info, fabiBaseConfig())
         const consoleManagedProviders = new Set<string>()
         let activeOrgName: string | undefined
 
