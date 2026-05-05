@@ -14,6 +14,7 @@ import { SWARM_DEFAULTS } from "./defaults"
 import { checkScheduler, type SchedulerInfo } from "./scheduler"
 import { spawnWorker, type WorkerHandle, type WorkerStatus } from "./worker"
 import { tryInstallParallax, type InstallResult } from "./installer"
+import { discoverSwarm, type DiscoverResult, type RegistrySwarm } from "./registry"
 
 const log = Log.create({ service: "swarm.lifecycle" })
 
@@ -22,16 +23,24 @@ const log = Log.create({ service: "swarm.lifecycle" })
 // ---------------------------------------------------------------------------
 
 export interface SwarmRuntime {
+  /** URL du registry pour l'auto-discovery (peut être vide pour skip). */
+  registryUrl: string
   /** URL HTTP du scheduler — utilisée pour healthcheck ET pour le provider. */
   schedulerUrl: string
   /** PeerID Lattica — passée à `parallax join -s`. */
   schedulerPeer: string
+  /** ID du swarm préféré (si fourni explicitement, skip auto-pick). */
+  preferredSwarmId?: string
+  /** Modèle préféré (filtre si plusieurs swarms). */
+  preferredModel?: string
   /** Si true : pas de spawn worker (mode consumer-only, dev / debug). */
   noParallax: boolean
   /** Forward stdout/stderr du worker vers stderr. */
   verbose: boolean
   /** Override du chemin parallax. */
   parallaxBin?: string
+  /** Si true : on n'essaie pas le registry, on prend les défauts/env directement. */
+  skipRegistry: boolean
 }
 
 /**
@@ -43,18 +52,31 @@ export interface SwarmRuntime {
 export function resolveSwarmRuntime(overrides: Partial<SwarmRuntime> = {}): SwarmRuntime {
   const fromEnv = (key: string) => process.env[key]?.trim() || undefined
   const env = {
+    registryUrl: fromEnv("FABI_REGISTRY"),
     schedulerUrl: fromEnv("FABI_SCHEDULER"),
     schedulerPeer: fromEnv("FABI_SCHEDULER_PEER"),
+    preferredSwarmId: fromEnv("FABI_SWARM"),
+    preferredModel: fromEnv("FABI_SWARM_MODEL"),
     parallaxBin: fromEnv("FABI_PARALLAX_BIN"),
     noParallax: fromEnv("FABI_NO_PARALLAX") === "1",
     verbose: fromEnv("FABI_VERBOSE") === "1",
+    skipRegistry: fromEnv("FABI_NO_REGISTRY") === "1",
   }
   return {
+    registryUrl: overrides.registryUrl ?? env.registryUrl ?? SWARM_DEFAULTS.registry,
     schedulerUrl: overrides.schedulerUrl ?? env.schedulerUrl ?? SWARM_DEFAULTS.scheduler,
     schedulerPeer: overrides.schedulerPeer ?? env.schedulerPeer ?? SWARM_DEFAULTS.schedulerPeer,
+    preferredSwarmId: overrides.preferredSwarmId ?? env.preferredSwarmId,
+    preferredModel: overrides.preferredModel ?? env.preferredModel,
     noParallax: overrides.noParallax ?? env.noParallax,
     verbose: overrides.verbose ?? env.verbose,
     parallaxBin: overrides.parallaxBin ?? env.parallaxBin,
+    // Si l'utilisateur fournit un peer ID en dur (flag/env) on respecte ce choix
+    // et on skip le registry. Idem si flag --no-registry / FABI_NO_REGISTRY=1.
+    skipRegistry:
+      overrides.skipRegistry ??
+      env.skipRegistry ??
+      Boolean(env.schedulerPeer),
   }
 }
 
@@ -147,9 +169,16 @@ export async function startSwarm(
   runtime: SwarmRuntime,
   onStatus: (event: SwarmStartEvent) => void = () => {},
 ): Promise<SwarmHandle> {
+  // 0. Auto-discovery via le registry (sauf si l'utilisateur a forcé un peer
+  // ou désactivé le registry). On résout schedulerUrl + schedulerPeer ici ;
+  // les défauts hardcodés ne servent plus que de fallback.
+  const resolved = await resolveFromRegistry(runtime, onStatus)
+  const effectiveUrl = resolved.schedulerUrl
+  const effectivePeer = resolved.schedulerPeer
+
   // 1. Healthcheck scheduler — informatif, jamais bloquant
-  const scheduler = await checkScheduler(runtime.schedulerUrl, SWARM_DEFAULTS.healthcheckTimeoutMs)
-  onStatus({ kind: "scheduler", info: scheduler, url: runtime.schedulerUrl })
+  const scheduler = await checkScheduler(effectiveUrl, SWARM_DEFAULTS.healthcheckTimeoutMs)
+  onStatus({ kind: "scheduler", info: scheduler, url: effectiveUrl })
 
   // 2. Worker — REQUIS sauf en mode dev (--no-parallax)
   let worker: WorkerHandle | null = null
@@ -162,7 +191,7 @@ export async function startSwarm(
     }> => {
       let lastStatusKind: WorkerStatus["kind"] | null = null
       const w = await spawnWorker({
-        schedulerPeer: runtime.schedulerPeer,
+        schedulerPeer: effectivePeer,
         binOverride: binOverride ?? runtime.parallaxBin,
         verbose: runtime.verbose,
         onStatus: (s) => {
@@ -243,8 +272,74 @@ export function shutdownActiveSync(): void {
 // ---------------------------------------------------------------------------
 
 export type SwarmStartEvent =
+  | { kind: "discovery"; result: DiscoverResult }
+  | { kind: "discovery-skipped"; reason: "no-registry" | "explicit-peer" }
+  | { kind: "discovery-fallback"; reason: string }
   | { kind: "scheduler"; info: SchedulerInfo; url: string }
   | { kind: "worker"; status: WorkerStatus }
   | { kind: "worker-disabled" }
   | { kind: "installer-prompt" }
   | { kind: "installer-result"; result: InstallResult }
+
+// ---------------------------------------------------------------------------
+// Auto-discovery via le registry
+// ---------------------------------------------------------------------------
+
+interface ResolvedSwarm {
+  schedulerUrl: string
+  schedulerPeer: string
+  /** L'entrée registry choisie, si la résolution a abouti via registry. */
+  registryEntry: RegistrySwarm | null
+}
+
+/**
+ * Résout `schedulerUrl` et `schedulerPeer` finaux à utiliser, en privilégiant
+ * le registry. Le runtime contient déjà des valeurs résolues depuis env/flags ;
+ * le registry permet de les rafraîchir dynamiquement.
+ */
+async function resolveFromRegistry(
+  runtime: SwarmRuntime,
+  onStatus: (event: SwarmStartEvent) => void,
+): Promise<ResolvedSwarm> {
+  if (runtime.skipRegistry || !runtime.registryUrl) {
+    onStatus({
+      kind: "discovery-skipped",
+      reason: runtime.skipRegistry ? "explicit-peer" : "no-registry",
+    })
+    return {
+      schedulerUrl: runtime.schedulerUrl,
+      schedulerPeer: runtime.schedulerPeer,
+      registryEntry: null,
+    }
+  }
+
+  const result = await discoverSwarm({
+    registryUrl: runtime.registryUrl,
+    preferredId: runtime.preferredSwarmId,
+    preferredModel: runtime.preferredModel,
+    timeoutMs: SWARM_DEFAULTS.registryTimeoutMs,
+  })
+
+  onStatus({ kind: "discovery", result })
+
+  if (result.kind === "ok") {
+    return {
+      schedulerUrl: result.swarm.schedulerUrl,
+      schedulerPeer: result.swarm.schedulerPeer ?? runtime.schedulerPeer,
+      registryEntry: result.swarm,
+    }
+  }
+
+  // Fallback : on log le motif et on utilise les valeurs runtime (env/défauts).
+  const reason =
+    result.kind === "no-match"
+      ? `no swarm matched (${result.reason})`
+      : `registry error (${result.error.message})`
+  log.warn("registry discovery failed, using fallback", { reason })
+  onStatus({ kind: "discovery-fallback", reason })
+  return {
+    schedulerUrl: runtime.schedulerUrl,
+    schedulerPeer: runtime.schedulerPeer,
+    registryEntry: null,
+  }
+}

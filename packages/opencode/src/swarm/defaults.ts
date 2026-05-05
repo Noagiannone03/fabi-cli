@@ -1,21 +1,29 @@
 // Constantes du swarm Fabi.
 //
-// Ces valeurs représentent la prod Fabi. Surchargeables par :
-//   - flags CLI (--scheduler, --scheduler-peer, --no-parallax)
-//   - env (FABI_SCHEDULER, FABI_SCHEDULER_PEER, FABI_NO_PARALLAX, etc.)
-//   - config user (~/.config/opencode/opencode.json clé "fabi.swarm")
+// Source de vérité runtime : le `fabi-registry` (auto-discovery via Docker
+// labels côté serveur). Cf `packages/fabi-registry/` dans le meta-projet.
+// Les valeurs ci-dessous servent de fallback si le registry est injoignable.
 //
-// À terme : auto-discovery via GET /swarm.json sur le scheduler.
+// Surchargeables par :
+//   - flags CLI (--registry, --swarm, --scheduler, --scheduler-peer, --no-parallax)
+//   - env (FABI_REGISTRY, FABI_SCHEDULER, FABI_SCHEDULER_PEER, FABI_NO_PARALLAX, ...)
+//   - config user (~/.config/opencode/opencode.json clé "fabi.swarm")
 
 export const SWARM_DEFAULTS = {
-  /** URL HTTP du scheduler (OpenAI-compatible API + healthcheck). Sans trailing slash. */
+  /** URL du fabi-registry (auto-discovery). Sans trailing slash. */
+  registry: "http://37.59.98.16:3002",
+
+  /** Fallback : URL HTTP du scheduler si le registry est injoignable. */
   scheduler: "http://37.59.98.16:3001",
 
-  /** PeerID Lattica/libp2p à passer à `parallax join -s`. "auto" = découverte LAN. */
+  /** Fallback : PeerID Lattica/libp2p si le registry est injoignable. */
   schedulerPeer: "12D3KooWKLCTHRAhMEafQfaGZTAEx8kJjeMqpXDDeyhBGVotuSfR",
 
-  /** Modèle servi par le swarm. Doit matcher ce que le scheduler annonce. */
+  /** Modèle attendu par défaut (override via --swarm-model). */
   model: "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+
+  /** Timeout fetch du registry au boot, en ms. */
+  registryTimeoutMs: 3000,
 
   /** Timeout du healthcheck scheduler au boot, en ms. */
   healthcheckTimeoutMs: 3000,

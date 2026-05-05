@@ -9,6 +9,7 @@ import { AgentCommand } from "./cli/cmd/agent"
 import { UpgradeCommand } from "./cli/cmd/upgrade"
 import { UninstallCommand } from "./cli/cmd/uninstall"
 import { ModelsCommand } from "./cli/cmd/models"
+import { SwarmsCommand } from "./cli/cmd/swarms"
 import { UI } from "./cli/ui"
 import { Installation } from "./installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -80,6 +81,35 @@ function printSwarmEvent(event: Swarm.SwarmStartEvent, runtime: Swarm.SwarmRunti
   const writeLine = (msg: string) => process.stderr.write(`${tag} ${msg}${reset}${EOL}`)
 
   switch (event.kind) {
+    case "discovery": {
+      const r = event.result
+      if (r.kind === "ok") {
+        writeLine(
+          `${ok}swarm découvert${reset} : ${r.swarm.id} (${r.swarm.peers} peer${r.swarm.peers > 1 ? "s" : ""}, ${r.swarm.totalVramGb} GB VRAM)`,
+        )
+        writeLine(`${dim}            model=${r.swarm.model}`)
+      } else if (r.kind === "no-match") {
+        writeLine(`${warn}registry: ${r.reason}${reset}`)
+        if (r.allSwarms.length > 0) {
+          writeLine(
+            `${dim}            disponibles: ${r.allSwarms.map((s) => `${s.id}(${s.status})`).join(", ")}`,
+          )
+        }
+      } else {
+        writeLine(`${warn}registry injoignable${reset} : ${r.error.message}`)
+      }
+      break
+    }
+    case "discovery-skipped": {
+      writeLine(
+        `${dim}auto-discovery skippée (${event.reason === "explicit-peer" ? "--scheduler-peer fourni" : "pas de registry configuré"})${reset}`,
+      )
+      break
+    }
+    case "discovery-fallback": {
+      writeLine(`${dim}fallback vers le scheduler par défaut (${event.reason})${reset}`)
+      break
+    }
     case "scheduler": {
       if (event.info.reachable) {
         writeLine(`${ok}scheduler joignable${reset} : ${event.url}`)
@@ -208,13 +238,29 @@ const cli = yargs(args)
     type: "boolean",
     default: true,
   })
+  .option("registry", {
+    describe: "URL du fabi-registry (auto-discovery des swarms)",
+    type: "string",
+  })
+  .option("swarm", {
+    describe: "ID du swarm à rejoindre (recherche dans le registry)",
+    type: "string",
+  })
+  .option("swarm-model", {
+    describe: "filtre les swarms par modèle (substring du nom HuggingFace)",
+    type: "string",
+  })
   .option("scheduler", {
-    describe: "URL HTTP du scheduler swarm Fabi (override la config)",
+    describe: "URL HTTP du scheduler — override le registry",
     type: "string",
   })
   .option("scheduler-peer", {
-    describe: "PeerID Lattica du scheduler à passer à `parallax join -s`",
+    describe: "PeerID Lattica du scheduler — override le registry",
     type: "string",
+  })
+  .option("no-registry", {
+    describe: "skip l'auto-discovery via registry, utilise les flags/env directement",
+    type: "boolean",
   })
   .option("swarm-verbose", {
     describe: "forwarde stdout/stderr du worker parallax vers stderr",
@@ -300,10 +346,16 @@ const cli = yargs(args)
     if (!Swarm.shouldStartSwarm(command)) return
 
     const runtime = Swarm.resolveSwarmRuntime({
+      registryUrl: opts.registry as string | undefined,
+      preferredSwarmId: opts.swarm as string | undefined,
+      preferredModel: opts.swarmModel as string | undefined,
       schedulerUrl: opts.scheduler as string | undefined,
       schedulerPeer: opts.schedulerPeer as string | undefined,
       // yargs traite --no-parallax comme parallax: false (cf. .option ci-dessus).
       noParallax: opts.parallax === false ? true : undefined,
+      // --scheduler-peer explicite OU --no-registry → skip registry
+      skipRegistry:
+        Boolean(opts.schedulerPeer) || opts.noRegistry === true ? true : undefined,
       verbose: opts.swarmVerbose === true ? true : undefined,
     })
 
@@ -338,6 +390,7 @@ const cli = yargs(args)
   .command(ServeCommand)
   .command(WebCommand)
   .command(ModelsCommand)
+  .command(SwarmsCommand)
   .command(StatsCommand)
   .command(ExportCommand)
   .command(ImportCommand)
