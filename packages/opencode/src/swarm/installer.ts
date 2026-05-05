@@ -10,9 +10,14 @@
 // mieux qu'un installer custom qui devrait reproduire cette logique.
 //
 // Sources possibles (par ordre de priorité) :
-//   1. env FABI_PARALLAX_SOURCE  (override explicite, accepte path local OU pkg PyPI OU git+https)
-//   2. clone local du fork swarm-engine si dispo (= dev local du méta-projet)
-//   3. git+https://github.com/GradientHQ/parallax.git (le vrai Parallax — PAS le package "parallax" sur PyPI qui est un autre projet SSH)
+//   1. venv bundlé dans le tarball Fabi (runtime/parallax-venv/) — court-circuit total
+//   2. env FABI_PARALLAX_SOURCE  (override explicite, accepte path local OU URL git)
+//   3. clone local du fork swarm-engine si dispo (= dev local du méta-projet)
+//   4. git clone GradientHQ/parallax dans ~/.local/share/fabi/runtime/parallax-src/
+//      puis pip install -e . — IMPORTANT : on passe par un clone + editable
+//      car le pyproject.toml upstream a un build-backend poetry-core qui ignore
+//      les sous-packages en mode wheel (`pip install git+https://`). Le mode
+//      editable expose le source dir via .pth → tous les sous-packages visibles.
 
 import { spawn } from "node:child_process"
 import { existsSync, mkdirSync } from "node:fs"
@@ -35,22 +40,46 @@ function installRoot(): string {
   return join(data, "fabi", "runtime")
 }
 
-/** Dossier `bin` du venv créé par l'installer. */
+/** Nom du venv créé par l'installer interactif (fallback). */
+const INTERACTIVE_VENV_NAME = ".venv"
+
+/** Nom du venv bundlé dans le tarball Fabi (priorité). */
+const BUNDLED_VENV_NAME = "parallax-venv"
+
+function binSubdir(): string {
+  return process.platform === "win32" ? "Scripts" : "bin"
+}
+
+function parallaxFileName(): string {
+  return process.platform === "win32" ? "parallax.exe" : "parallax"
+}
+
+/** Dossier `bin` du venv interactif (fallback). */
 export function venvBinDir(): string {
-  return join(installRoot(), ".venv", process.platform === "win32" ? "Scripts" : "bin")
+  return join(installRoot(), INTERACTIVE_VENV_NAME, binSubdir())
 }
 
-/** Path attendu du binaire `parallax` après install. */
+/** Dossier `bin` du venv bundlé dans le tarball. */
+function bundledVenvBinDir(): string {
+  return join(installRoot(), BUNDLED_VENV_NAME, binSubdir())
+}
+
+/**
+ * Path du binaire `parallax` à utiliser — préfère le venv bundlé du tarball
+ * si présent, sinon retombe sur le venv créé par l'installer interactif.
+ */
 export function managedParallaxBin(): string {
-  return join(venvBinDir(), process.platform === "win32" ? "parallax.exe" : "parallax")
+  const bundled = join(bundledVenvBinDir(), parallaxFileName())
+  if (existsSync(bundled)) return bundled
+  return join(venvBinDir(), parallaxFileName())
 }
 
-/** Path attendu du binaire `pip` du venv. */
+/** Path attendu du binaire `pip` du venv interactif. */
 function venvPipBin(): string {
   return join(venvBinDir(), process.platform === "win32" ? "pip.exe" : "pip")
 }
 
-/** Path attendu du binaire `python` du venv. */
+/** Path attendu du binaire `python` du venv interactif. */
 function venvPythonBin(): string {
   return join(venvBinDir(), process.platform === "win32" ? "python.exe" : "python")
 }
@@ -118,23 +147,32 @@ async function findSystemPython(): Promise<string | null> {
 // ---------------------------------------------------------------------------
 
 interface SourceInfo {
-  /** Chemin local OU nom de package PyPI. */
-  spec: string
-  /** Si vrai, on utilise `pip install -e <spec>` (editable, dev). */
-  editable: boolean
+  /** Path local du clone Parallax — utilisé pour `pip install -e <path>`. */
+  localPath: string
+  /** URL git si on doit cloner (sinon undefined = path déjà prêt). */
+  cloneUrl?: string
   /** Description user-friendly pour le prompt. */
   display: string
 }
+
+const UPSTREAM_PARALLAX_GIT = "https://github.com/GradientHQ/parallax.git"
 
 function resolveSource(): SourceInfo {
   // 1. Override explicite via env
   const envSource = process.env.FABI_PARALLAX_SOURCE?.trim()
   if (envSource) {
+    // Chemin local → utilisable directement
     if (envSource.startsWith("/") || envSource.startsWith(".") || envSource.startsWith("~")) {
       const abs = envSource.startsWith("~") ? join(homedir(), envSource.slice(1)) : resolve(envSource)
-      return { spec: abs, editable: true, display: `path local : ${abs}` }
+      return { localPath: abs, display: `clone local : ${abs}` }
     }
-    return { spec: envSource, editable: false, display: `package : ${envSource}` }
+    // URL git (https/git+https/ssh) → on clone ce fork
+    const cloneUrl = envSource.replace(/^git\+/, "")
+    return {
+      localPath: join(installRoot(), "parallax-src"),
+      cloneUrl,
+      display: `git clone : ${cloneUrl}`,
+    }
   }
 
   // 2. Clone local du fork swarm-engine (dev du méta-projet Fabi)
@@ -142,18 +180,92 @@ function resolveSource(): SourceInfo {
   // jusqu'à ...packages/swarm-engine = remonter de 5 niveaux
   const localFork = resolve(HERE, "..", "..", "..", "..", "..", "swarm-engine")
   if (existsSync(join(localFork, "setup.py")) || existsSync(join(localFork, "pyproject.toml"))) {
-    return { spec: localFork, editable: true, display: `clone local : ${localFork}` }
+    return { localPath: localFork, display: `clone local : ${localFork}` }
   }
 
-  // 3. Fallback : on installe le runtime Parallax directement depuis le repo Git
-  // upstream (GradientHQ). Le package "parallax" sur PyPI est un AUTRE projet
-  // (un outil SSH sans rapport) — il ne faut surtout pas l'utiliser comme fallback.
-  // Override possible via FABI_PARALLAX_SOURCE pour pointer sur un fork.
+  // 3. Fallback : on clone Parallax upstream dans ~/.local/share/fabi/runtime/parallax-src/
+  // puis pip install -e . (editable). Le mode editable contourne le bug de packaging
+  // upstream (pyproject.toml poetry-core ignore les sous-packages parallax_utils,
+  // scheduling, parallax_extensions en mode wheel).
   return {
-    spec: "git+https://github.com/GradientHQ/parallax.git",
-    editable: false,
-    display: "git+https://github.com/GradientHQ/parallax.git",
+    localPath: join(installRoot(), "parallax-src"),
+    cloneUrl: UPSTREAM_PARALLAX_GIT,
+    display: `git clone : ${UPSTREAM_PARALLAX_GIT}`,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Détection des extras pip selon la plateforme
+// ---------------------------------------------------------------------------
+
+/**
+ * Renvoie l'extra à passer à `pip install -e parallax[<extra>]` selon la
+ * plateforme et le matériel.
+ *
+ * - macOS Apple Silicon → "mac" (torch + mlx + mlx-lm + nanobind)
+ * - Linux x64 + NVIDIA  → "gpu" (sglang + mlx variants)
+ * - Linux + pas de GPU  → "" (transformers only — fonctionnement dégradé)
+ *
+ * Override possible via FABI_PARALLAX_EXTRA (utile pour vllm sur certains hôtes).
+ */
+async function resolveExtras(): Promise<string> {
+  const env = process.env.FABI_PARALLAX_EXTRA?.trim()
+  if (env !== undefined) return env
+
+  if (process.platform === "darwin") return "mac"
+
+  if (process.platform === "linux") {
+    // Détection NVIDIA via la présence de nvidia-smi
+    const r = await captureCmd("nvidia-smi", ["--version"])
+    if (r.exitCode === 0) return "gpu"
+    return ""
+  }
+
+  return ""
+}
+
+// ---------------------------------------------------------------------------
+// Auto-install Python si absent (best effort, prompt user)
+// ---------------------------------------------------------------------------
+
+async function tryAutoInstallPython(): Promise<string | null> {
+  if (!process.stdin.isTTY) return null
+
+  // macOS : on tente Homebrew si dispo
+  if (process.platform === "darwin") {
+    const brew = await captureCmd("brew", ["--version"])
+    if (brew.exitCode !== 0) {
+      process.stderr.write(
+        `\n[fabi installer] Python 3.10+ requis. Homebrew non détecté — installe Python depuis https://www.python.org/ ou via pyenv puis relance fabi.\n`,
+      )
+      return null
+    }
+    process.stderr.write(
+      `\n[fabi installer] Python 3.10+ requis. Tu as Homebrew, on peut l'installer maintenant.\n`,
+    )
+    const ok = await confirm(`Installer python@3.12 via Homebrew ?`)
+    if (!ok) return null
+    process.stderr.write(`[fabi installer] brew install python@3.12 …\n`)
+    const code = await streamCmd("brew", ["install", "python@3.12"])
+    if (code !== 0) return null
+    // Le binaire python3 unversionné est dans le libexec de python@3.12
+    const candidate = "/opt/homebrew/opt/python@3.12/libexec/bin/python3"
+    if (existsSync(candidate)) return candidate
+    return await findSystemPython()
+  }
+
+  // Linux : on ne fait rien d'automatique (sudo apt nécessaire), juste un message clair
+  if (process.platform === "linux") {
+    process.stderr.write(
+      `\n[fabi installer] Python 3.10+ requis. Installe-le avec ton package manager :\n`,
+    )
+    process.stderr.write(`  Debian/Ubuntu : sudo apt install python3.12 python3.12-venv\n`)
+    process.stderr.write(`  Fedora/RHEL   : sudo dnf install python3.12\n`)
+    process.stderr.write(`  Arch          : sudo pacman -S python\n`)
+    process.stderr.write(`Puis relance fabi.\n`)
+  }
+
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -218,20 +330,26 @@ export async function tryInstallParallax(): Promise<InstallResult> {
     }
   }
 
-  // 2. Vérifier Python
-  const python = await findSystemPython()
+  // 2. Vérifier Python — propose un install auto si absent
+  let python = await findSystemPython()
   if (!python) {
-    return {
-      ok: false,
-      reason: "python-missing",
-      message:
-        "Python 3.10+ requis et non trouvé dans le PATH. " +
-        "Installe-le depuis https://www.python.org/ ou via ton package manager (apt, brew, pyenv, ...).",
+    const installed = await tryAutoInstallPython()
+    if (installed) {
+      python = installed
+    } else {
+      return {
+        ok: false,
+        reason: "python-missing",
+        message:
+          "Python 3.10+ requis et non trouvé dans le PATH. " +
+          "Installe-le depuis https://www.python.org/ ou via ton package manager (apt, brew, pyenv, ...).",
+      }
     }
   }
 
   // 3. Prompt user
   const source = resolveSource()
+  const extras = await resolveExtras()
   const dim = UI.Style.TEXT_DIM
   const reset = UI.Style.TEXT_NORMAL
   const bold = UI.Style.TEXT_NORMAL_BOLD
@@ -242,7 +360,8 @@ export async function tryInstallParallax(): Promise<InstallResult> {
   process.stderr.write(`${dim}- Source     : ${source.display}${reset}\n`)
   process.stderr.write(`${dim}- Cible      : ${installRoot()}${reset}\n`)
   process.stderr.write(`${dim}- Python     : ${python}${reset}\n`)
-  process.stderr.write(`${dim}- Taille DL  : ~1.5 GB (PyTorch + vLLM/MLX + deps)${reset}\n`)
+  process.stderr.write(`${dim}- Extras     : ${extras || "(aucun)"} ${reset}\n`)
+  process.stderr.write(`${dim}- Taille DL  : ~1.5 GB (PyTorch + MLX/vLLM + deps)${reset}\n`)
   process.stderr.write(`${dim}- Durée      : 5-15 min selon ta connexion${reset}\n`)
   process.stderr.write("\n")
 
@@ -255,11 +374,36 @@ export async function tryInstallParallax(): Promise<InstallResult> {
     }
   }
 
-  // 4. Création du venv
+  // 4. Clone si la source vient d'une URL git (et pas déjà clonée)
   const root = installRoot()
-  process.stderr.write(`\n${info}[fabi installer]${reset} Création du virtualenv...\n`)
   mkdirSync(root, { recursive: true })
-  const venvPath = join(root, ".venv")
+  if (source.cloneUrl) {
+    if (existsSync(join(source.localPath, ".git"))) {
+      process.stderr.write(
+        `${info}[fabi installer]${reset} Mise à jour du clone Parallax existant…\n`,
+      )
+      const pullCode = await streamCmd("git", ["-C", source.localPath, "pull", "--ff-only"])
+      if (pullCode !== 0) {
+        process.stderr.write(`${dim}(git pull a échoué, on continue avec le clone existant)${reset}\n`)
+      }
+    } else {
+      process.stderr.write(
+        `${info}[fabi installer]${reset} Clonage de Parallax depuis ${source.cloneUrl}…\n`,
+      )
+      const cloneCode = await streamCmd("git", ["clone", "--depth=1", source.cloneUrl, source.localPath])
+      if (cloneCode !== 0) {
+        return {
+          ok: false,
+          reason: "pip-failed",
+          message: `Échec git clone ${source.cloneUrl} (code ${cloneCode}). Vérifie ta connexion et que git est installé.`,
+        }
+      }
+    }
+  }
+
+  // 5. Création du venv interactif
+  process.stderr.write(`\n${info}[fabi installer]${reset} Création du virtualenv…\n`)
+  const venvPath = join(root, INTERACTIVE_VENV_NAME)
   const venvCode = await streamCmd(python, ["-m", "venv", venvPath])
   if (venvCode !== 0) {
     return {
@@ -269,34 +413,49 @@ export async function tryInstallParallax(): Promise<InstallResult> {
     }
   }
 
-  // 5. Upgrade pip (silencieux pour ne pas trop bruiter)
+  // 6. Upgrade pip (silencieux pour ne pas trop bruiter)
   const pip = venvPipBin()
-  process.stderr.write(`${info}[fabi installer]${reset} Mise à jour de pip dans le venv...\n`)
+  process.stderr.write(`${info}[fabi installer]${reset} Mise à jour de pip…\n`)
   await streamCmd(venvPythonBin(), ["-m", "pip", "install", "--upgrade", "pip", "--quiet"])
 
-  // 6. Installation de Parallax (le gros morceau)
-  process.stderr.write(`\n${info}[fabi installer]${reset} Installation de Parallax depuis ${source.display}...\n`)
-  process.stderr.write(`${dim}            Sois patient — PyTorch + vLLM peut prendre plusieurs minutes.${reset}\n\n`)
-  const installArgs = source.editable ? ["install", "-e", source.spec] : ["install", source.spec]
-  const installCode = await streamCmd(pip, installArgs)
+  // 7. Installation de Parallax en mode editable depuis le clone local
+  // (le mode editable expose tous les sous-packages via .pth, contournant
+  // le bug de packaging poetry-core upstream qui n'expose que `parallax/`).
+  const editableSpec = extras ? `${source.localPath}[${extras}]` : source.localPath
+  process.stderr.write(
+    `\n${info}[fabi installer]${reset} pip install -e "${editableSpec}"…\n`,
+  )
+  process.stderr.write(`${dim}            Sois patient — PyTorch + MLX peuvent prendre plusieurs minutes.${reset}\n\n`)
+  const installCode = await streamCmd(pip, ["install", "-e", editableSpec])
   if (installCode !== 0) {
     return {
       ok: false,
       reason: "pip-failed",
-      message: `Échec de pip install (code ${installCode}). Regarde les logs au-dessus pour la cause précise.`,
+      message: `Échec de pip install -e (code ${installCode}). Regarde les logs au-dessus pour la cause précise.`,
     }
   }
 
-  // 7. Vérification finale
-  if (!existsSync(binPath)) {
+  // 8. Workaround : `requests` est utilisé par parallax/cli.py mais absent
+  // des dépendances upstream (pyproject.toml). On l'installe explicitement.
+  process.stderr.write(`${info}[fabi installer]${reset} Install de la dep manquante 'requests'…\n`)
+  const reqCode = await streamCmd(pip, ["install", "--quiet", "requests"])
+  if (reqCode !== 0) {
+    process.stderr.write(`${dim}(install de requests a échoué, parallax pourra planter au démarrage)${reset}\n`)
+  }
+
+  // 9. Vérification finale
+  const interactiveBin = join(venvBinDir(), parallaxFileName())
+  if (!existsSync(interactiveBin)) {
     return {
       ok: false,
       reason: "binary-not-found-after-install",
-      message: `pip install est passé mais le binaire ${binPath} est absent. Le package ne fournit peut-être pas d'entry-point 'parallax'.`,
+      message: `pip install est passé mais le binaire ${interactiveBin} est absent. Vérifie les logs ci-dessus.`,
     }
   }
 
-  process.stderr.write(`\n${info}[fabi installer]${reset} ${UI.Style.TEXT_SUCCESS}✅ Parallax installé avec succès${reset}\n`)
-  process.stderr.write(`${dim}            Binaire : ${binPath}${reset}\n\n`)
-  return { ok: true, binPath }
+  process.stderr.write(
+    `\n${info}[fabi installer]${reset} ${UI.Style.TEXT_SUCCESS}✅ Parallax installé avec succès${reset}\n`,
+  )
+  process.stderr.write(`${dim}            Binaire : ${interactiveBin}${reset}\n\n`)
+  return { ok: true, binPath: interactiveBin }
 }
