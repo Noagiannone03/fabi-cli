@@ -1,4 +1,4 @@
-// Healthcheck du scheduler Aircarto.
+// Healthcheck du scheduler Fabi.
 //
 // Le scheduler Parallax expose /cluster/status_json avec des infos utiles
 // (statut, modèle servi, nombre de workers connectés). On l'appelle au boot

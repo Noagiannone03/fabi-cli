@@ -2,7 +2,7 @@
 //
 // Le swarm est le moteur d'inférence distribué P2P qui sous-tend Fabi.
 // Quand l'utilisateur lance `fabi`, le binaire :
-//   1. ping le scheduler Aircarto (info)
+//   1. ping le scheduler Fabi (info)
 //   2. spawn un worker Parallax local (= rejoint le swarm comme contributeur)
 //   3. lance la TUI / commande
 //   4. à l'exit : kill propre du worker (= quitte le swarm)

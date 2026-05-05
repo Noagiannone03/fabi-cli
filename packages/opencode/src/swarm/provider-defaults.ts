@@ -19,9 +19,9 @@ export interface SwarmProviderOverrides {
 }
 
 /**
- * Construit le bloc provider Fabi à merger dans la config OpenCode.
+ * Construit le bloc provider Fabi à merger dans la config runtime.
  *
- * Format = celui qu'OpenCode attend pour un provider OpenAI-compatible :
+ * Format = celui attendu pour un provider OpenAI-compatible :
  * `npm: "@ai-sdk/openai-compatible"`, `api: "<scheduler>/v1"`, `models: { ... }`.
  */
 export function buildSwarmProvider(overrides: SwarmProviderOverrides = {}) {
@@ -30,7 +30,7 @@ export function buildSwarmProvider(overrides: SwarmProviderOverrides = {}) {
 
   return {
     id: SWARM_PROVIDER_ID,
-    name: "Fabi (Aircarto Swarm)",
+    name: "Fabi Swarm",
     npm: "@ai-sdk/openai-compatible",
     api: `${schedulerUrl}/v1`,
     options: {
@@ -54,7 +54,7 @@ export function buildSwarmProvider(overrides: SwarmProviderOverrides = {}) {
   } as const
 }
 
-/** Modèle par défaut au format provider/model attendu par OpenCode. */
+/** Modèle par défaut au format provider/model attendu par le runtime. */
 export function buildDefaultModelRef(overrides: SwarmProviderOverrides = {}): string {
   const modelId = overrides.modelId ?? SWARM_DEFAULTS.model
   return `${SWARM_PROVIDER_ID}/${modelId}`

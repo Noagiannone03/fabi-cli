@@ -1,6 +1,6 @@
 // Constantes du swarm Fabi.
 //
-// Ces valeurs représentent la prod Aircarto. Surchargeables par :
+// Ces valeurs représentent la prod Fabi. Surchargeables par :
 //   - flags CLI (--scheduler, --scheduler-peer, --no-parallax)
 //   - env (FABI_SCHEDULER, FABI_SCHEDULER_PEER, FABI_NO_PARALLAX, etc.)
 //   - config user (~/.config/opencode/opencode.json clé "fabi.swarm")
@@ -32,5 +32,5 @@ export const SWARM_DEFAULTS = {
 
 export type SwarmDefaults = typeof SWARM_DEFAULTS
 
-/** Identifiant du provider tel que vu par OpenCode/AI SDK. */
+/** Identifiant du provider tel que vu par le runtime AI SDK. */
 export const SWARM_PROVIDER_ID = "fabi"
