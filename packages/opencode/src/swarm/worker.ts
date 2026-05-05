@@ -12,6 +12,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { SWARM_DEFAULTS } from "./defaults"
 
 const log = Log.create({ service: "swarm.worker" })
+const RESTART_DELAY_MS = 30_000
 
 export type WorkerStatus =
   | { kind: "starting" }
@@ -115,75 +116,98 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
 
   // `parallax join -s` veut une PeerID Lattica/multiaddr (pas une URL HTTP).
   const args = ["join", "-s", schedulerPeer]
-  log.info("spawning parallax worker", { bin, args })
-
-  const child: ChildProcess = spawn(bin, args, {
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: process.platform !== "win32",
-    env: process.env,
-  })
-  // Détacher du parent pour qu'on puisse tuer tout le process group d'un coup.
-  child.unref?.()
-
-  const pid = child.pid
-  if (typeof pid !== "number") {
-    onStatus?.({ kind: "error", message: "spawn parallax sans PID — échec immédiat" })
-    return null
-  }
-
-  onStatus?.({ kind: "running", pid })
-
-  const startedAt = Date.now()
-  const lastOutput: string[] = []
-  const rememberOutput = (prefix: string, chunk: Buffer): void => {
-    const text = chunk.toString().trimEnd()
-    if (!text) return
-    for (const line of text.split(/\r?\n/)) {
-      lastOutput.push(`${prefix}${line}`)
-      if (lastOutput.length > 40) lastOutput.shift()
-    }
-  }
-
-  if (verbose) {
-    child.stdout?.on("data", (d: Buffer) => {
-      rememberOutput("", d)
-      const text = d.toString().trimEnd()
-      if (text) process.stderr.write(`\x1b[2m[parallax] ${text}\x1b[0m\n`)
-    })
-    child.stderr?.on("data", (d: Buffer) => {
-      rememberOutput("stderr: ", d)
-      const text = d.toString().trimEnd()
-      if (text) process.stderr.write(`\x1b[2m[parallax!] ${text}\x1b[0m\n`)
-    })
-  } else {
-    // On lit les flux pour ne pas remplir le pipe et bloquer Parallax, tout en
-    // gardant un petit ring buffer. Parallax peut sortir code=0 même après une
-    // exception interne, donc ces lignes sont nécessaires pour diagnostiquer.
-    child.stdout?.on("data", (d: Buffer) => rememberOutput("", d))
-    child.stderr?.on("data", (d: Buffer) => rememberOutput("stderr: ", d))
-  }
-
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   let stopped = false
-  child.on("close", (code, signal) => {
-    const runtimeMs = Date.now() - startedAt
-    if (stopped) {
-      log.info("parallax worker stopped", { pid, code, signal, runtimeMs })
-      for (const cb of exitCallbacks) cb(code, signal)
-      return
+  let child: ChildProcess | null = null
+  let pid = 0
+  let restartTimer: NodeJS.Timeout | null = null
+
+  const startChild = (): boolean => {
+    onStatus?.({ kind: "starting" })
+    log.info("spawning parallax worker", { bin, args })
+
+    const next = spawn(bin, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      env: process.env,
+    })
+    next.unref?.()
+
+    const nextPid = next.pid
+    if (typeof nextPid !== "number") {
+      onStatus?.({ kind: "error", message: "spawn parallax sans PID — échec immédiat" })
+      return false
     }
-    log.warn("parallax worker exited unexpectedly", { pid, code, signal, runtimeMs })
-    onStatus?.({ kind: "exited", code, signal, runtimeMs, output: lastOutput.slice(-12) })
-    for (const cb of exitCallbacks) cb(code, signal)
-  })
-  child.on("error", (err) => {
-    log.error("parallax worker error", { pid, error: err.message })
-    onStatus?.({ kind: "error", message: err.message })
-  })
+
+    child = next
+    pid = nextPid
+    onStatus?.({ kind: "running", pid })
+
+    const startedAt = Date.now()
+    const lastOutput: string[] = []
+    const rememberOutput = (prefix: string, chunk: Buffer): void => {
+      const text = chunk.toString().trimEnd()
+      if (!text) return
+      for (const line of text.split(/\r?\n/)) {
+        lastOutput.push(`${prefix}${line}`)
+        if (lastOutput.length > 40) lastOutput.shift()
+      }
+    }
+
+    if (verbose) {
+      next.stdout?.on("data", (d: Buffer) => {
+        rememberOutput("", d)
+        const text = d.toString().trimEnd()
+        if (text) process.stderr.write(`\x1b[2m[parallax] ${text}\x1b[0m\n`)
+      })
+      next.stderr?.on("data", (d: Buffer) => {
+        rememberOutput("stderr: ", d)
+        const text = d.toString().trimEnd()
+        if (text) process.stderr.write(`\x1b[2m[parallax!] ${text}\x1b[0m\n`)
+      })
+    } else {
+      // On lit les flux pour ne pas remplir le pipe et bloquer Parallax, tout en
+      // gardant un petit ring buffer. Parallax peut sortir code=0 même après une
+      // exception interne, donc ces lignes sont nécessaires pour diagnostiquer.
+      next.stdout?.on("data", (d: Buffer) => rememberOutput("", d))
+      next.stderr?.on("data", (d: Buffer) => rememberOutput("stderr: ", d))
+    }
+
+    next.on("close", (code, signal) => {
+      const runtimeMs = Date.now() - startedAt
+      if (stopped) {
+        log.info("parallax worker stopped", { pid: nextPid, code, signal, runtimeMs })
+        for (const cb of exitCallbacks) cb(code, signal)
+        return
+      }
+
+      log.warn("parallax worker exited unexpectedly", { pid: nextPid, code, signal, runtimeMs })
+      onStatus?.({ kind: "exited", code, signal, runtimeMs, output: lastOutput.slice(-12) })
+      for (const cb of exitCallbacks) cb(code, signal)
+
+      restartTimer = setTimeout(() => {
+        restartTimer = null
+        if (!stopped) startChild()
+      }, RESTART_DELAY_MS)
+      restartTimer.unref()
+    })
+    next.on("error", (err) => {
+      log.error("parallax worker error", { pid: nextPid, error: err.message })
+      onStatus?.({ kind: "error", message: err.message })
+    })
+
+    return true
+  }
+
+  if (!startChild()) return null
 
   const stop = async (): Promise<void> => {
     if (stopped) return
     stopped = true
+    if (restartTimer) clearTimeout(restartTimer)
+    const current = child
+    const currentPid = pid
+    if (!current || !currentPid) return
     log.info("stopping parallax worker", { pid })
 
     return new Promise<void>((resolve) => {
@@ -193,14 +217,14 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
         done = true
         resolve()
       }
-      child.once("close", finish)
+      current.once("close", finish)
 
       try {
         if (process.platform !== "win32") {
           // Négatif → tout le process group
-          process.kill(-pid, "SIGTERM")
+          process.kill(-currentPid, "SIGTERM")
         } else {
-          child.kill("SIGTERM")
+          current.kill("SIGTERM")
         }
       } catch {
         // déjà mort
@@ -211,10 +235,10 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
       const grace = SWARM_DEFAULTS.workerShutdownGraceMs
       setTimeout(() => {
         if (done) return
-        log.warn("parallax worker did not exit in time, sending SIGKILL", { pid, grace })
+        log.warn("parallax worker did not exit in time, sending SIGKILL", { pid: currentPid, grace })
         try {
-          if (process.platform !== "win32") process.kill(-pid, "SIGKILL")
-          else child.kill("SIGKILL")
+          if (process.platform !== "win32") process.kill(-currentPid, "SIGKILL")
+          else current.kill("SIGKILL")
         } catch {
           /* déjà mort */
         }
@@ -229,16 +253,22 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
   const killSync = (): void => {
     if (stopped) return
     stopped = true
+    if (restartTimer) clearTimeout(restartTimer)
+    const current = child
+    const currentPid = pid
+    if (!current || !currentPid) return
     try {
-      if (process.platform !== "win32") process.kill(-pid, "SIGTERM")
-      else child.kill("SIGTERM")
+      if (process.platform !== "win32") process.kill(-currentPid, "SIGTERM")
+      else current.kill("SIGTERM")
     } catch {
       /* déjà mort */
     }
   }
 
   return {
-    pid,
+    get pid() {
+      return pid
+    },
     stop,
     killSync,
     onExit: (cb) => {
