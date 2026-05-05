@@ -111,7 +111,13 @@ function printSwarmEvent(event: Swarm.SwarmStartEvent, runtime: Swarm.SwarmRunti
           writeLine(`${warn}parallax non installé${reset} — lancement de l'installer interactif…`)
           break
         case "exited":
-          writeLine(`${warn}worker parallax arrêté${reset} (code=${s.code} signal=${s.signal ?? "-"})`)
+          writeLine(
+            `${warn}worker parallax arrêté inattendu${reset} (code=${s.code} signal=${s.signal ?? "-"} runtime=${Math.round(s.runtimeMs / 1000)}s)`,
+          )
+          if (s.output.length) {
+            writeLine(`${dim}dernières lignes parallax :`)
+            for (const line of s.output.slice(-6)) writeLine(`${dim}  ${line}`)
+          }
           break
         case "error":
           writeLine(`${warn}worker parallax : ${s.message}${reset}`)

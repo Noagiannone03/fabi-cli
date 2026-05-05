@@ -17,7 +17,13 @@ export type WorkerStatus =
   | { kind: "starting" }
   | { kind: "running"; pid: number }
   | { kind: "missing-binary" }
-  | { kind: "exited"; code: number | null; signal: NodeJS.Signals | null }
+  | {
+      kind: "exited"
+      code: number | null
+      signal: NodeJS.Signals | null
+      runtimeMs: number
+      output: string[]
+    }
   | { kind: "error"; message: string }
 
 export interface WorkerHandle {
@@ -78,6 +84,8 @@ function findManagedBin(): string | null {
   const dataRoot = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share")
   const venvBinDir = process.platform === "win32" ? "Scripts" : "bin"
   const candidates = [
+    // Runtime bundlé dans les tarballs Fabi (priorité prod).
+    join(dataRoot, "fabi", "runtime", "parallax-venv", venvBinDir, binary),
     // Install via fabi-installer (venv dans ~/.local/share/fabi/runtime/.venv/)
     join(dataRoot, "fabi", "runtime", ".venv", venvBinDir, binary),
     // Legacy : binaire posé directement dans runtime/ (par un installer custom)
@@ -125,25 +133,47 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
 
   onStatus?.({ kind: "running", pid })
 
+  const startedAt = Date.now()
+  const lastOutput: string[] = []
+  const rememberOutput = (prefix: string, chunk: Buffer): void => {
+    const text = chunk.toString().trimEnd()
+    if (!text) return
+    for (const line of text.split(/\r?\n/)) {
+      lastOutput.push(`${prefix}${line}`)
+      if (lastOutput.length > 40) lastOutput.shift()
+    }
+  }
+
   if (verbose) {
     child.stdout?.on("data", (d: Buffer) => {
+      rememberOutput("", d)
       const text = d.toString().trimEnd()
       if (text) process.stderr.write(`\x1b[2m[parallax] ${text}\x1b[0m\n`)
     })
     child.stderr?.on("data", (d: Buffer) => {
+      rememberOutput("stderr: ", d)
       const text = d.toString().trimEnd()
       if (text) process.stderr.write(`\x1b[2m[parallax!] ${text}\x1b[0m\n`)
     })
   } else {
-    // On lit quand même les flux pour ne pas remplir le pipe et bloquer Parallax.
-    child.stdout?.on("data", () => {})
-    child.stderr?.on("data", () => {})
+    // On lit les flux pour ne pas remplir le pipe et bloquer Parallax, tout en
+    // gardant un petit ring buffer. Parallax peut sortir code=0 même après une
+    // exception interne, donc ces lignes sont nécessaires pour diagnostiquer.
+    child.stdout?.on("data", (d: Buffer) => rememberOutput("", d))
+    child.stderr?.on("data", (d: Buffer) => rememberOutput("stderr: ", d))
   }
 
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
+  let stopped = false
   child.on("close", (code, signal) => {
-    log.info("parallax worker exited", { pid, code, signal })
-    onStatus?.({ kind: "exited", code, signal })
+    const runtimeMs = Date.now() - startedAt
+    if (stopped) {
+      log.info("parallax worker stopped", { pid, code, signal, runtimeMs })
+      for (const cb of exitCallbacks) cb(code, signal)
+      return
+    }
+    log.warn("parallax worker exited unexpectedly", { pid, code, signal, runtimeMs })
+    onStatus?.({ kind: "exited", code, signal, runtimeMs, output: lastOutput.slice(-12) })
     for (const cb of exitCallbacks) cb(code, signal)
   })
   child.on("error", (err) => {
@@ -151,7 +181,6 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     onStatus?.({ kind: "error", message: err.message })
   })
 
-  let stopped = false
   const stop = async (): Promise<void> => {
     if (stopped) return
     stopped = true
