@@ -10,9 +10,9 @@
 // mieux qu'un installer custom qui devrait reproduire cette logique.
 //
 // Sources possibles (par ordre de priorité) :
-//   1. env FABI_PARALLAX_SOURCE  (override explicite, accepte path local OU pkg PyPI)
+//   1. env FABI_PARALLAX_SOURCE  (override explicite, accepte path local OU pkg PyPI OU git+https)
 //   2. clone local du fork swarm-engine si dispo (= dev local du méta-projet)
-//   3. "parallax" depuis PyPI (= prod, quand Aircarto aura publié son fork sur PyPI)
+//   3. git+https://github.com/GradientHQ/parallax.git (le vrai Parallax — PAS le package "parallax" sur PyPI qui est un autre projet SSH)
 
 import { spawn } from "node:child_process"
 import { existsSync, mkdirSync } from "node:fs"
@@ -145,8 +145,15 @@ function resolveSource(): SourceInfo {
     return { spec: localFork, editable: true, display: `clone local : ${localFork}` }
   }
 
-  // 3. Fallback PyPI (à valider quand Aircarto publiera)
-  return { spec: "parallax", editable: false, display: "package : parallax (PyPI)" }
+  // 3. Fallback : on installe le runtime Parallax directement depuis le repo Git
+  // upstream (GradientHQ). Le package "parallax" sur PyPI est un AUTRE projet
+  // (un outil SSH sans rapport) — il ne faut surtout pas l'utiliser comme fallback.
+  // Override possible via FABI_PARALLAX_SOURCE pour pointer sur un fork.
+  return {
+    spec: "git+https://github.com/GradientHQ/parallax.git",
+    editable: false,
+    display: "git+https://github.com/GradientHQ/parallax.git",
+  }
 }
 
 // ---------------------------------------------------------------------------
