@@ -8,6 +8,7 @@ import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
 
 import { getScrollAcceleration } from "../../util/scroll"
 import { WorkspaceLabel } from "../../component/workspace-label"
+import { SwarmIndicator } from "../../component/swarm-indicator"
 
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const project = useProject()
@@ -26,7 +27,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
     <Show when={session()}>
       <box
         backgroundColor={theme.backgroundPanel}
-        width={42}
+        width={32}
         height="100%"
         paddingTop={1}
         paddingBottom={1}
@@ -34,6 +35,9 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
         paddingRight={2}
         position={props.overlay ? "absolute" : "relative"}
       >
+        <box flexShrink={0} paddingBottom={1}>
+          <SwarmIndicator compact />
+        </box>
         <scrollbox
           flexGrow={1}
           scrollAcceleration={scrollAcceleration()}
@@ -88,10 +92,8 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
         <box flexShrink={0} gap={1} paddingTop={1}>
           <TuiPluginRuntime.Slot name="sidebar_footer" mode="single_winner" session_id={props.sessionID}>
             <text fg={theme.textMuted}>
-              <span style={{ fg: theme.success }}>•</span> <b>Open</b>
-              <span style={{ fg: theme.text }}>
-                <b>Code</b>
-              </span>{" "}
+              <span style={{ fg: theme.primary, bold: true }}>fabi</span>
+              {" · "}
               <span>{InstallationVersion}</span>
             </text>
           </TuiPluginRuntime.Slot>

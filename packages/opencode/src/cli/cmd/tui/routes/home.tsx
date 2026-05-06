@@ -1,7 +1,7 @@
 import { Prompt, type PromptRef } from "@tui/component/prompt"
-import { createEffect, createMemo, createSignal } from "solid-js"
+import { createEffect, createSignal } from "solid-js"
 import { Logo } from "../component/logo"
-import { Mascot } from "../component/mascot"
+import { SwarmIndicator } from "../component/swarm-indicator"
 import { useProject } from "../context/project"
 import { useSync } from "../context/sync"
 import { useTheme } from "@tui/context/theme"
@@ -11,7 +11,6 @@ import { useRouteData } from "@tui/context/route"
 import { usePromptRef } from "../context/prompt"
 import { useLocal } from "../context/local"
 import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
-import { useSwarmRegistry } from "../component/use-swarm-registry"
 
 let once = false
 const placeholder = {
@@ -28,19 +27,7 @@ export function Home() {
   const args = useArgs()
   const local = useLocal()
   const { theme } = useTheme()
-  const swarm = useSwarmRegistry()
   let sent = false
-
-  // Petit indicateur live sous le logo : nombre total de peers + swarms online
-  const swarmStatus = createMemo(() => {
-    const list = swarm.swarms()
-    if (swarm.loading() && list.length === 0) return "discovering swarm…"
-    if (swarm.error() && list.length === 0) return "registry offline"
-    const online = list.filter((s) => s.status === "online")
-    if (online.length === 0) return "no swarm online"
-    const peers = online.reduce((acc, s) => acc + s.peers, 0)
-    return `${online.length} swarm${online.length > 1 ? "s" : ""} · ${peers} peer${peers === 1 ? "" : "s"} live`
-  })
 
   const bind = (r: PromptRef | undefined) => {
     setRef(r)
@@ -75,20 +62,17 @@ export function Home() {
         <box height={4} minHeight={0} flexShrink={1} />
         <box flexShrink={0} alignItems="center">
           <TuiPluginRuntime.Slot name="home_logo" mode="replace">
-            <box flexDirection="row" alignItems="flex-end" gap={3}>
-              <Logo inkLeft={theme.primary} inkRight={theme.secondary} />
-              <Mascot />
-            </box>
+            <Logo inkLeft={theme.primary} inkRight={theme.text} />
           </TuiPluginRuntime.Slot>
-          <box paddingTop={1} flexDirection="row" gap={1}>
-            <text fg={theme.textMuted}>code en peer to peer ·</text>
-            <text fg={theme.primary}>fini les limites de tokens</text>
+          <box paddingTop={2} flexDirection="row" gap={1}>
+            <text fg={theme.textMuted}>code</text>
             <text fg={theme.textMuted}>·</text>
-            <text fg={theme.secondary}>open source</text>
+            <text fg={theme.text}>peer to peer</text>
+            <text fg={theme.textMuted}>·</text>
+            <text fg={theme.primary}>open source</text>
           </box>
-          <box paddingTop={1} flexDirection="row" gap={1} alignItems="center">
-            <text fg={theme.primary}>◆</text>
-            <text fg={theme.textMuted}>{swarmStatus()}</text>
+          <box paddingTop={1}>
+            <SwarmIndicator />
           </box>
         </box>
         <box height={1} minHeight={0} flexShrink={1} />
