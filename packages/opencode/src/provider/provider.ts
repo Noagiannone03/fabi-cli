@@ -28,8 +28,50 @@ import { optionalOmitUndefined, withStatics } from "@/util/schema"
 
 import * as ProviderTransform from "./transform"
 import { ModelID, ProviderID } from "./schema"
+import { SWARM_DEFAULTS, SWARM_PROVIDER_ID, fetchRegistrySwarms, type RegistrySwarm } from "../swarm"
 
 const log = Log.create({ service: "provider" })
+
+function inferSwarmFamily(modelID: string): string {
+  const lower = modelID.toLowerCase()
+  if (lower.includes("qwen")) return "qwen"
+  if (lower.includes("llama")) return "llama"
+  if (lower.includes("deepseek")) return "deepseek"
+  if (lower.includes("kimi") || lower.includes("moonshot")) return "kimi"
+  if (lower.includes("glm") || lower.includes("zai")) return "glm"
+  return "fabi"
+}
+
+function buildSwarmConfigModel(swarm: RegistrySwarm) {
+  const modelID = swarm.model.trim()
+  return {
+    id: modelID,
+    name: (modelID.split("/").pop() ?? modelID) + " via " + swarm.name,
+    family: inferSwarmFamily(modelID),
+    tool_call: true,
+    reasoning: false,
+    temperature: true,
+    modalities: { input: ["text"], output: ["text"] },
+    limit: { context: 32768, output: 8192 },
+    provider: {
+      npm: "@ai-sdk/openai-compatible",
+      api: swarm.schedulerUrl.replace(/\/+$/, "") + "/v1",
+    },
+  }
+}
+
+async function discoverSwarmConfigModels(): Promise<Record<string, ReturnType<typeof buildSwarmConfigModel>>> {
+  if (process.env.FABI_NO_REGISTRY === "1") return {}
+  const registryUrl = (process.env.FABI_REGISTRY?.trim() || SWARM_DEFAULTS.registry).replace(/\/+$/, "")
+  try {
+    const swarms = await fetchRegistrySwarms(registryUrl, { timeoutMs: SWARM_DEFAULTS.registryTimeoutMs })
+    const available = swarms.filter((swarm) => swarm.schedulerUrl && swarm.model)
+    return Object.fromEntries(available.map((swarm) => [swarm.model, buildSwarmConfigModel(swarm)]))
+  } catch (error) {
+    log.warn("failed to discover fabi swarm models", { registryUrl, error: (error as Error).message })
+    return {}
+  }
+}
 
 function shouldUseCopilotResponsesApi(modelID: string): boolean {
   const match = /^gpt-(\d+)/.exec(modelID)
@@ -1129,7 +1171,7 @@ const layer: Layer.Layer<
         const plugins = yield* plugin.list()
 
         // now read config providers - includes any modifications from plugin config() hook
-        const configProviders = Object.entries(cfg.provider ?? {})
+        let configProviders = Object.entries(cfg.provider ?? {}) as Array<[string, any]>
         const disabled = new Set(cfg.disabled_providers ?? [])
         const enabled = cfg.enabled_providers ? new Set(cfg.enabled_providers) : null
 
@@ -1137,6 +1179,29 @@ const layer: Layer.Layer<
           if (enabled && !enabled.has(providerID)) return false
           if (disabled.has(providerID)) return false
           return true
+        }
+
+        const swarmProviderID = ProviderID.make(SWARM_PROVIDER_ID)
+        const discoveredSwarmModels = yield* Effect.promise(discoverSwarmConfigModels)
+        if (Object.keys(discoveredSwarmModels).length > 0 && isProviderAllowed(swarmProviderID)) {
+          const existing = (cfg.provider?.[SWARM_PROVIDER_ID] ?? {}) as Record<string, any>
+          configProviders = [
+            ...configProviders.filter(([id]) => id !== SWARM_PROVIDER_ID),
+            [
+              SWARM_PROVIDER_ID,
+              {
+                ...existing,
+                models: {
+                  ...Object.fromEntries(
+                    Object.entries((existing.models ?? {}) as Record<string, any>).filter(
+                      ([id]) => id !== SWARM_DEFAULTS.model,
+                    ),
+                  ),
+                  ...discoveredSwarmModels,
+                },
+              },
+            ],
+          ]
         }
 
         for (const hook of plugins) {
@@ -1178,7 +1243,7 @@ const layer: Layer.Layer<
             models: existing?.models ?? {},
           }
 
-          for (const [modelID, model] of Object.entries(provider.models ?? {})) {
+          for (const [modelID, model] of Object.entries((provider.models ?? {}) as Record<string, any>)) {
             const existingModel = parsed.models[model.id ?? modelID]
             const apiID = model.id ?? existingModel?.api.id ?? modelID
             const apiNpm =
@@ -1250,7 +1315,7 @@ const layer: Layer.Layer<
               release_date: model.release_date ?? existingModel?.release_date ?? "",
               variants: {},
             }
-            const merged = mergeDeep(ProviderTransform.variants(parsedModel), model.variants ?? {})
+            const merged = mergeDeep(ProviderTransform.variants(parsedModel), model.variants ?? {}) as Record<string, any>
             parsedModel.variants = mapValues(
               pickBy(merged, (v) => !v.disabled),
               (v) => omit(v, ["disabled"]),
@@ -1678,7 +1743,17 @@ const layer: Layer.Layer<
 
     const defaultModel = Effect.fn("Provider.defaultModel")(function* () {
       const cfg = yield* config.get()
-      if (cfg.model) return parseModel(cfg.model)
+      if (cfg.model) {
+        const parsed = parseModel(cfg.model)
+        const current = yield* InstanceState.get(state)
+        const configuredModelExists = current.providers[parsed.providerID]?.models[parsed.modelID]
+        const isBuiltInSwarmDefault = cfg.model === SWARM_PROVIDER_ID + "/" + SWARM_DEFAULTS.model
+        const fabiProvider = current.providers[ProviderID.make(SWARM_PROVIDER_ID)]
+        const hasDiscoveredSwarmModels =
+          fabiProvider && Object.keys(fabiProvider.models).some((id) => id !== SWARM_DEFAULTS.model)
+        if (configuredModelExists && (!isBuiltInSwarmDefault || !hasDiscoveredSwarmModels)) return parsed
+        if (!isBuiltInSwarmDefault) return parsed
+      }
 
       const s = yield* InstanceState.get(state)
       const recent = yield* fs.readJson(path.join(Global.Path.state, "model.json")).pipe(
