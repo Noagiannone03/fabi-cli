@@ -5,7 +5,7 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { Filesystem } from "@/util/filesystem"
 import { useLocal } from "@tui/context/local"
-import { tint, useTheme } from "@tui/context/theme"
+import { selectedForeground, tint, useTheme } from "@tui/context/theme"
 import { Spinner } from "@tui/component/spinner"
 import { useSDK } from "@tui/context/sdk"
 import { useRoute } from "@tui/context/route"
@@ -32,7 +32,6 @@ import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
 import { formatDuration } from "@/util/format"
-import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
@@ -1161,24 +1160,13 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  const statusSpinner = ["◜", "◠", "◝", "◞", "◡", "◟"]
   const spinnerDef = createMemo(() => {
     const agent = local.agent.current()
     const color = agent ? local.agent.color(agent.name) : theme.border
     return {
-      frames: createFrames({
-        color,
-        style: "blocks",
-        inactiveFactor: 0.6,
-        // enableFading: false,
-        minAlpha: 0.3,
-      }),
-      color: createColors({
-        color,
-        style: "blocks",
-        inactiveFactor: 0.6,
-        // enableFading: false,
-        minAlpha: 0.3,
-      }),
+      frames: statusSpinner,
+      color,
     }
   })
 
@@ -1224,6 +1212,7 @@ export function Prompt(props: PromptProps) {
             leftT: "│",
             rightT: "│",
           }}
+          backgroundColor={theme.backgroundPanel}
         >
           <box
             paddingLeft={2}
@@ -1231,9 +1220,22 @@ export function Prompt(props: PromptProps) {
             paddingTop={1}
             paddingBottom={1}
             flexShrink={0}
-            backgroundColor={theme.backgroundElement}
+            backgroundColor={theme.backgroundPanel}
             flexGrow={1}
           >
+            <box flexDirection="row" justifyContent="space-between" paddingBottom={1}>
+              <box flexDirection="row" gap={1}>
+                <text>
+                  <span style={{ bg: highlight(), fg: selectedForeground(theme, highlight()), bold: true }}>
+                    {store.mode === "shell" ? " SHELL " : " FABI "}
+                  </span>
+                </text>
+                <text fg={theme.textMuted}>{store.mode === "shell" ? "run command" : "ask, build, refactor"}</text>
+              </box>
+              <text fg={theme.textMuted}>
+                {keybind.print("command_list")} <span style={{ fg: theme.primary }}>/</span>
+              </text>
+            </box>
             <textarea
               placeholder={placeholderText()}
               placeholderColor={theme.textMuted}
@@ -1426,7 +1428,7 @@ export function Prompt(props: PromptProps) {
                 }, 0)
               }}
               onMouseDown={(r: MouseEvent) => r.target?.focus()}
-              focusedBackgroundColor={theme.backgroundElement}
+              focusedBackgroundColor={theme.backgroundPanel}
               cursorColor={props.disabled ? theme.backgroundElement : theme.text}
               syntaxStyle={syntax()}
             />
@@ -1483,7 +1485,7 @@ export function Prompt(props: PromptProps) {
                 <box flexShrink={0} flexDirection="row" gap={1}>
                   <box marginLeft={1}>
                     <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
-                      <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
+                      <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={70} />
                     </Show>
                   </box>
                   <box flexDirection="row" gap={1} flexShrink={0}>

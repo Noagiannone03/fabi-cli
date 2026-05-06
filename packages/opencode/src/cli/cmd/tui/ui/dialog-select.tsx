@@ -245,8 +245,10 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       <box paddingLeft={4} paddingRight={4}>
         <box flexDirection="row" justifyContent="space-between" alignItems="center">
           <box flexDirection="row" gap={1}>
-            <text fg={theme.primary} attributes={TextAttributes.BOLD}>
-              ▍
+            <text>
+              <span style={{ bg: theme.primary, fg: selectedForeground(theme, theme.primary), bold: true }}>
+                {" / "}
+              </span>
             </text>
             <text fg={theme.text} attributes={TextAttributes.BOLD}>
               {props.title}
@@ -258,28 +260,48 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
         </box>
         <Show when={props.renderFilter !== false}>
           <box paddingTop={1}>
-            <input
-              onInput={(e) => {
-                batch(() => {
-                  setStore("filter", e)
-                  props.onFilter?.(e)
-                })
+            <box
+              border={["left"]}
+              borderColor={theme.primary}
+              customBorderChars={{
+                topLeft: "",
+                topRight: "",
+                bottomLeft: "",
+                bottomRight: "",
+                horizontal: " ",
+                vertical: "▌",
+                topT: "",
+                bottomT: "",
+                leftT: "",
+                rightT: "",
+                cross: "",
               }}
-              focusedBackgroundColor={theme.backgroundPanel}
-              cursorColor={theme.primary}
-              focusedTextColor={theme.textMuted}
-              ref={(r) => {
-                input = r
-                input.traits = { status: "FILTER" }
-                setTimeout(() => {
-                  if (!input) return
-                  if (input.isDestroyed) return
-                  input.focus()
-                }, 1)
-              }}
-              placeholder={props.placeholder ?? "Search"}
-              placeholderColor={theme.textMuted}
-            />
+            >
+              <box paddingLeft={2} paddingRight={1} backgroundColor={theme.backgroundPanel}>
+                <input
+                  onInput={(e) => {
+                    batch(() => {
+                      setStore("filter", e)
+                      props.onFilter?.(e)
+                    })
+                  }}
+                  focusedBackgroundColor={theme.backgroundPanel}
+                  cursorColor={theme.primary}
+                  focusedTextColor={theme.text}
+                  ref={(r) => {
+                    input = r
+                    input.traits = { status: "FILTER" }
+                    setTimeout(() => {
+                      if (!input) return
+                      if (input.isDestroyed) return
+                      input.focus()
+                    }, 1)
+                  }}
+                  placeholder={props.placeholder ?? "Search"}
+                  placeholderColor={theme.textMuted}
+                />
+              </box>
+            </box>
           </box>
         </Show>
       </box>
@@ -349,6 +371,8 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                         backgroundColor={active() ? (option.bg ?? theme.primary) : RGBA.fromInts(0, 0, 0, 0)}
                         paddingLeft={current() || option.gutter ? 1 : 3}
                         paddingRight={3}
+                        paddingTop={active() ? 1 : 0}
+                        paddingBottom={active() ? 1 : 0}
                         gap={1}
                       >
                         <Show when={!current() && option.margin}>

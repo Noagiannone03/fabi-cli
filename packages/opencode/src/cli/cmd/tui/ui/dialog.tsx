@@ -70,6 +70,7 @@ export function Dialog(
           rightT: "│",
         }}
         paddingTop={1}
+        paddingBottom={1}
       >
         {props.children}
       </box>

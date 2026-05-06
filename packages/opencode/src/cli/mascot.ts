@@ -4,6 +4,10 @@
 // Rendu via sub-pixel blocks (`▀` avec fg = pixel haut, bg = pixel bas) →
 // 12 lignes pixel = 6 lignes terminal. Voir `component/mascot.tsx`.
 //
+// Design : oreilles dressées séparées par un gap, dôme du crâne arrondi
+// qui apparaît dès la rangée 3 (transition douce ear→head, top de tête
+// effilé sur les côtés). Yeux centrés avec highlight blanc.
+//
 // Palette (5 couleurs + transparent), pensée pour matcher le brand orange :
 //   .  transparent
 //   1  noir            yeux (pupille), truffe, bouche
@@ -21,18 +25,17 @@ export const mascotPalette: Record<string, string | null> = {
   "5": "#FFFFFF",
 }
 
-// Tête de renard, oreilles dressées, regard vers le devant, bouche fermée.
 export const mascot: readonly string[] = [
   ".2..........2.",
   ".22........22.",
   ".242......242.",
-  "2244......4422",
-  "23335133153332",
-  "23331133113332",
-  "23334433443332",
-  "23334411443332",
-  "23344411443332",
-  ".233444444332.",
-  "..23344433322.",
-  "...23333322...",
+  "22433333333422",
+  ".233333333332.",
+  ".233351331532.",
+  ".233311331132.",
+  ".233344334432.",
+  ".233344114432.",
+  ".233344444432.",
+  "..2334444332..",
+  "...23344332...",
 ]

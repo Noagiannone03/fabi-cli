@@ -155,7 +155,8 @@ export function Session() {
   })
 
   const dimensions = useTerminalDimensions()
-  const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "hide")
+  // The right sidebar is intentionally session-local now. No wide-screen auto mode,
+  // and no persisted value can reopen it on the next launch.
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
   const [conceal, setConceal] = createSignal(true)
   const [showThinking, setShowThinking] = kv.signal("thinking_visibility", true)
@@ -171,11 +172,10 @@ export function Session() {
   const sidebarVisible = createMemo(() => {
     if (session()?.parentID) return false
     if (sidebarOpen()) return true
-    if (sidebar() === "auto" && wide()) return true
     return false
   })
   const showTimestamps = createMemo(() => timestamps() === "show")
-  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 32 : 0) - 4)
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
@@ -611,11 +611,7 @@ export function Session() {
       keybind: "sidebar_toggle",
       category: "Session",
       onSelect: (dialog) => {
-        batch(() => {
-          const isVisible = sidebarVisible()
-          setSidebar(() => (isVisible ? "hide" : "auto"))
-          setSidebarOpen(!isVisible)
-        })
+        setSidebarOpen(!sidebarVisible())
         dialog.clear()
       },
     },
@@ -1277,26 +1273,7 @@ function UserMessage(props: {
   return (
     <>
       <Show when={text()}>
-        <box
-          id={props.message.id}
-          border
-          borderColor={color()}
-          customBorderChars={{
-            topLeft: "╭",
-            topRight: "╮",
-            bottomLeft: "╰",
-            bottomRight: "╯",
-            horizontal: "─",
-            vertical: "│",
-            topT: "─",
-            bottomT: "─",
-            leftT: "│",
-            rightT: "│",
-            cross: "┼",
-          }}
-          marginTop={props.index === 0 ? 0 : 1}
-          backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
-        >
+        <box id={props.message.id} marginTop={props.index === 0 ? 0 : 1} flexDirection="row" justifyContent="flex-end">
           <box
             onMouseOver={() => {
               setHover(true)
@@ -1305,12 +1282,37 @@ function UserMessage(props: {
               setHover(false)
             }}
             onMouseUp={props.onMouseUp}
-            paddingTop={0}
-            paddingBottom={0}
+            border
+            borderColor={hover() ? theme.primary : color()}
+            customBorderChars={{
+              topLeft: "╭",
+              topRight: "╮",
+              bottomLeft: "╰",
+              bottomRight: "╯",
+              horizontal: "─",
+              vertical: "│",
+              topT: "─",
+              bottomT: "─",
+              leftT: "│",
+              rightT: "│",
+              cross: "┼",
+            }}
+            maxWidth={Math.max(28, ctx.width - 8)}
+            paddingTop={1}
+            paddingBottom={1}
             paddingLeft={2}
             paddingRight={2}
+            backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
             flexShrink={0}
           >
+            <box flexDirection="row" gap={1} paddingBottom={1}>
+              <text>
+                <span style={{ bg: color(), fg: queuedFg(), bold: true }}> YOU </span>
+              </text>
+              <Show when={ctx.showTimestamps()}>
+                <text fg={theme.textMuted}>{Locale.todayTimeOrDateTime(props.message.time.created)}</text>
+              </Show>
+            </box>
             <text fg={theme.text}>{text()}</text>
             <Show when={files().length}>
               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
@@ -1331,19 +1333,8 @@ function UserMessage(props: {
                 </For>
               </box>
             </Show>
-            <Show
-              when={queued()}
-              fallback={
-                <Show when={ctx.showTimestamps()}>
-                  <text fg={theme.textMuted}>
-                    <span style={{ fg: theme.textMuted }}>
-                      {Locale.todayTimeOrDateTime(props.message.time.created)}
-                    </span>
-                  </text>
-                </Show>
-              }
-            >
-              <text fg={theme.textMuted}>
+            <Show when={queued()} fallback={<></>}>
+              <text fg={theme.textMuted} marginTop={1}>
                 <span style={{ bg: color(), fg: queuedFg(), bold: true }}> QUEUED </span>
               </text>
             </Show>

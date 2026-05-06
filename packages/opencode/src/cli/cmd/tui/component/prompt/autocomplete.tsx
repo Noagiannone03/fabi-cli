@@ -11,7 +11,6 @@ import { useSync } from "@tui/context/sync"
 import { getScrollAcceleration } from "../../util/scroll"
 import { useTuiConfig } from "../../context/tui-config"
 import { useTheme, selectedForeground } from "@tui/context/theme"
-import { SplitBorder } from "@tui/component/border"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import { useTerminalDimensions } from "@opentui/solid"
 import { Locale } from "@/util/locale"
@@ -668,12 +667,26 @@ export function Autocomplete(props: {
       left={position().x}
       width={position().width}
       zIndex={100}
-      {...SplitBorder}
-      borderColor={theme.border}
+      border
+      borderColor={theme.primary}
+      customBorderChars={{
+        topLeft: "╭",
+        topRight: "╮",
+        bottomLeft: "╰",
+        bottomRight: "╯",
+        horizontal: "─",
+        vertical: "│",
+        topT: "─",
+        bottomT: "─",
+        leftT: "│",
+        rightT: "│",
+        cross: "┼",
+      }}
+      backgroundColor={theme.backgroundPanel}
     >
       <scrollbox
         ref={(r: ScrollBoxRenderable) => (scroll = r)}
-        backgroundColor={theme.backgroundMenu}
+        backgroundColor={theme.backgroundPanel}
         height={height()}
         scrollbarOptions={{ visible: false }}
         scrollAcceleration={scrollAcceleration()}
@@ -688,8 +701,10 @@ export function Autocomplete(props: {
         >
           {(option, index) => (
             <box
-              paddingLeft={1}
-              paddingRight={1}
+              paddingLeft={2}
+              paddingRight={2}
+              paddingTop={index === store.selected ? 1 : 0}
+              paddingBottom={index === store.selected ? 1 : 0}
               backgroundColor={index === store.selected ? theme.primary : undefined}
               flexDirection="row"
               onMouseMove={() => {
