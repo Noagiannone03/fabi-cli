@@ -1,6 +1,7 @@
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import { createEffect, createMemo, createSignal } from "solid-js"
 import { Logo } from "../component/logo"
+import { Mascot } from "../component/mascot"
 import { useProject } from "../context/project"
 import { useSync } from "../context/sync"
 import { useTheme } from "@tui/context/theme"
@@ -74,11 +75,16 @@ export function Home() {
         <box height={4} minHeight={0} flexShrink={1} />
         <box flexShrink={0} alignItems="center">
           <TuiPluginRuntime.Slot name="home_logo" mode="replace">
-            <Logo />
+            <box flexDirection="row" alignItems="flex-end" gap={3}>
+              <Logo inkLeft={theme.primary} inkRight={theme.secondary} />
+              <Mascot />
+            </box>
           </TuiPluginRuntime.Slot>
           <box paddingTop={1} flexDirection="row" gap={1}>
-            <text fg={theme.textMuted}>distributed AI ·</text>
-            <text fg={theme.primary}>powered by the swarm</text>
+            <text fg={theme.textMuted}>code en peer to peer ·</text>
+            <text fg={theme.primary}>fini les limites de tokens</text>
+            <text fg={theme.textMuted}>·</text>
+            <text fg={theme.secondary}>open source</text>
           </box>
           <box paddingTop={1} flexDirection="row" gap={1} alignItems="center">
             <text fg={theme.primary}>◆</text>
@@ -104,6 +110,16 @@ export function Home() {
         <TuiPluginRuntime.Slot name="home_bottom" />
         <box flexGrow={1} minHeight={0} />
         <Toast />
+      </box>
+      <box
+        width="100%"
+        flexShrink={0}
+        flexDirection="row"
+        justifyContent="flex-end"
+        paddingRight={2}
+        paddingBottom={0}
+      >
+        <text fg={theme.textMuted}>empowered by undefined studio</text>
       </box>
       <box width="100%" flexShrink={0}>
         <TuiPluginRuntime.Slot name="home_footer" mode="single_winner" />

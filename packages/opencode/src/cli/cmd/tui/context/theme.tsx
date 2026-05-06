@@ -113,7 +113,7 @@ const fabi = {
     darkStep10: "#FF7A4F",
     darkStep11: "#a89488",
     darkStep12: "#fff2e8",
-    darkSecondary: "#7AA8FF",
+    darkSecondary: "#3D8AFF",
     darkAccent: "#FFF7F1",
     darkOrange: "#EC5B2B",
     darkYellow: "#FFC58A",
