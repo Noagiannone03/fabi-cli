@@ -155,7 +155,7 @@ export function Session() {
   })
 
   const dimensions = useTerminalDimensions()
-  const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
+  const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "hide")
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
   const [conceal, setConceal] = createSignal(true)
   const [showThinking, setShowThinking] = kv.signal("thinking_visibility", true)
@@ -1279,10 +1279,23 @@ function UserMessage(props: {
       <Show when={text()}>
         <box
           id={props.message.id}
-          border={["left"]}
+          border
           borderColor={color()}
-          customBorderChars={SplitBorder.customBorderChars}
+          customBorderChars={{
+            topLeft: "╭",
+            topRight: "╮",
+            bottomLeft: "╰",
+            bottomRight: "╯",
+            horizontal: "─",
+            vertical: "│",
+            topT: "─",
+            bottomT: "─",
+            leftT: "│",
+            rightT: "│",
+            cross: "┼",
+          }}
           marginTop={props.index === 0 ? 0 : 1}
+          backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
         >
           <box
             onMouseOver={() => {
@@ -1292,10 +1305,10 @@ function UserMessage(props: {
               setHover(false)
             }}
             onMouseUp={props.onMouseUp}
-            paddingTop={1}
-            paddingBottom={1}
+            paddingTop={0}
+            paddingBottom={0}
             paddingLeft={2}
-            backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+            paddingRight={2}
             flexShrink={0}
           >
             <text fg={theme.text}>{text()}</text>

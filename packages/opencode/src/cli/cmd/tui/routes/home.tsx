@@ -1,6 +1,7 @@
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import { createEffect, createSignal } from "solid-js"
 import { Logo } from "../component/logo"
+import { Mascot } from "../component/mascot"
 import { SwarmIndicator } from "../component/swarm-indicator"
 import { useProject } from "../context/project"
 import { useSync } from "../context/sync"
@@ -62,7 +63,10 @@ export function Home() {
         <box height={4} minHeight={0} flexShrink={1} />
         <box flexShrink={0} alignItems="center">
           <TuiPluginRuntime.Slot name="home_logo" mode="replace">
-            <Logo inkLeft={theme.primary} inkRight={theme.text} />
+            <box flexDirection="row" alignItems="flex-end" gap={3}>
+              <Logo inkLeft={theme.primary} inkRight={theme.text} />
+              <Mascot />
+            </box>
           </TuiPluginRuntime.Slot>
           <box paddingTop={2} flexDirection="row" gap={1}>
             <text fg={theme.textMuted}>code</text>
