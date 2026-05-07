@@ -16,14 +16,78 @@ const log = Log.create({ service: "swarm.worker" })
 const RESTART_DELAY_MS = 30_000
 
 /**
- * Construit l'environnement pour le worker Parallax avec des defaults
- * adaptés à l'hôte. Sur Apple silicon avec mémoire unifiée partagée
- * (Mac mini / MacBook 16-32 GB), les defaults Parallax (max-batch-size=8,
- * max-sequence-length=32768) provoquent un OOM Metal au premier prompt
- * lourd : Metal alloue les buffers GPU à hauteur de batch × seq, ce qui
- * sur 16 GB de RAM unifiée dépasse ce que le driver accepte. On force
- * des limites conservatrices pour le single-user perso. Les valeurs déjà
- * définies par l'utilisateur sont respectées (FABI_* ou PARALLAX_*).
+ * Limites worker à passer explicitement à `parallax join`. Marche avec
+ * upstream Parallax ET notre fork — `parallax/cli.py` utilise
+ * `parser.parse_known_args()` puis cherche les flags via `_flag_present`
+ * avant d'injecter ses propres defaults. Donc tout flag passé ici prend
+ * précédence sur les hardcodes upstream (4096 / 7168 / 8 / 32).
+ *
+ * Pourquoi côté CLI plutôt que via env var : le fork lit
+ * `PARALLAX_MAX_*` depuis `cli.py`, mais si l'user a un binaire `parallax`
+ * d'upstream (PyPI, brew, ancien venv), il NE lit PAS ces env vars et
+ * retombe sur les defaults rachitiques d'upstream. Passer en CLI args
+ * neutralise cette ambiguïté : peu importe le binaire installé, il
+ * accepte les flags de la même manière (argparse standard).
+ */
+interface WorkerLimits {
+  maxBatchSize: string
+  maxSequenceLength: string
+  maxNumTokensPerBatch: string
+  kvBlockSize: string
+}
+
+function pickWorkerLimits(): WorkerLimits {
+  const isAppleSilicon =
+    process.platform === "darwin" && process.arch === "arm64"
+  const ramGb = Math.round(totalmem() / 2 ** 30)
+
+  // Defaults Fabi (ce qu'on validait dans le fork patch 545a902). Convient
+  // à un agentic CLI : prompts >4k tokens fréquents, peu de concurrence.
+  let limits: WorkerLimits = {
+    maxBatchSize: "8",
+    maxSequenceLength: "32768",
+    maxNumTokensPerBatch: "16384",
+    kvBlockSize: "32",
+  }
+
+  if (isAppleSilicon && ramGb < 64) {
+    // Mémoire unifiée partagée Apple Silicon : Metal alloue
+    // batch × seq buffers sur la même RAM que l'OS + le browser. À
+    // batch=8 / seq=32768 on flingue 16 GB unifiés au premier prefill.
+    if (ramGb <= 24) {
+      limits = {
+        maxBatchSize: "1",
+        maxSequenceLength: "16384",
+        maxNumTokensPerBatch: "8192",
+        kvBlockSize: "32",
+      }
+    } else {
+      limits = {
+        maxBatchSize: "2",
+        maxSequenceLength: "32768",
+        maxNumTokensPerBatch: "16384",
+        kvBlockSize: "32",
+      }
+    }
+  }
+
+  // L'user peut tout overrider via env (la TUI ou un script wrapper).
+  return {
+    maxBatchSize:
+      process.env.PARALLAX_MAX_BATCH_SIZE?.trim() || limits.maxBatchSize,
+    maxSequenceLength:
+      process.env.PARALLAX_MAX_SEQUENCE_LENGTH?.trim() || limits.maxSequenceLength,
+    maxNumTokensPerBatch:
+      process.env.PARALLAX_MAX_NUM_TOKENS_PER_BATCH?.trim() ||
+      limits.maxNumTokensPerBatch,
+    kvBlockSize:
+      process.env.PARALLAX_KV_BLOCK_SIZE?.trim() || limits.kvBlockSize,
+  }
+}
+
+/**
+ * Env supplémentaire pour le worker (réserve mémoire système etc.). Les
+ * limites de batch/sequence sont passées en CLI args (cf. `pickWorkerLimits`).
  */
 function buildWorkerEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env }
@@ -32,24 +96,12 @@ function buildWorkerEnv(): NodeJS.ProcessEnv {
   if (!isAppleSilicon) return env
 
   const ramGb = Math.round(totalmem() / 2 ** 30)
-  // À 64 GB+ on suppose une station/serveur dédié, on garde les defaults Parallax.
   if (ramGb >= 64) return env
 
   const setIfUnset = (key: string, value: string) => {
     if (!env[key]?.trim()) env[key] = value
   }
-  // Valeurs validées sur M4 16 GB. Pour 32 GB Apple silicon on relâche un peu.
-  if (ramGb <= 24) {
-    setIfUnset("PARALLAX_MAX_BATCH_SIZE", "1")
-    setIfUnset("PARALLAX_MAX_SEQUENCE_LENGTH", "16384")
-    setIfUnset("PARALLAX_MAX_NUM_TOKENS_PER_BATCH", "8192")
-    setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", "4")
-  } else {
-    setIfUnset("PARALLAX_MAX_BATCH_SIZE", "2")
-    setIfUnset("PARALLAX_MAX_SEQUENCE_LENGTH", "32768")
-    setIfUnset("PARALLAX_MAX_NUM_TOKENS_PER_BATCH", "16384")
-    setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", "6")
-  }
+  setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", ramGb <= 24 ? "4" : "6")
   return env
 }
 
@@ -219,7 +271,7 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
   })
   if (!isManagedBin) {
     log.warn(
-      "parallax bin is OUTSIDE the fabi-managed runtime — patches Fabi (heartbeat, batch limits, fix scheduler) absent",
+      "parallax bin is OUTSIDE the fabi-managed runtime — patches Fabi (heartbeat, scheduler cancel-fix) absent. Worker limits are still passed via CLI args, so batch/seq sizing remains correct.",
       { bin, expectedRoot: fabiRuntimeRoot },
     )
   }
@@ -230,8 +282,21 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
   // observé sur Mac mini M4 → OOM Metal).
   killOrphanedWorkers(process.pid)
 
-  // `parallax join -s` veut une PeerID Lattica/multiaddr (pas une URL HTTP).
-  const args = ["join", "-s", schedulerPeer]
+  // Passer les limites en CLI args APRÈS `-s peer` : elles tombent dans
+  // `passthrough_args` côté `parallax/cli.py` (parser.parse_known_args),
+  // ce qui shorte les hardcodes upstream (4096 / 7168 / 8 / 32) qui ne
+  // s'injectent que si le flag n'est pas déjà présent.
+  const limits = pickWorkerLimits()
+  const args = [
+    "join",
+    "-s",
+    schedulerPeer,
+    "--max-batch-size", limits.maxBatchSize,
+    "--max-sequence-length", limits.maxSequenceLength,
+    "--max-num-tokens-per-batch", limits.maxNumTokensPerBatch,
+    "--kv-block-size", limits.kvBlockSize,
+  ]
+  log.info("worker limits resolved", { limits })
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   let stopped = false
   let child: ChildProcess | null = null
