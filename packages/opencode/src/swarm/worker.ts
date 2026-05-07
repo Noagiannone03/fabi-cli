@@ -4,15 +4,97 @@
 // tuer toute sa descendance d'un coup — Parallax fork des sous-process GPU
 // (vLLM, SGLang, MLX) qui doivent mourir avec lui.
 
-import { spawn, type ChildProcess } from "node:child_process"
+import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { existsSync } from "node:fs"
-import { homedir } from "node:os"
+import { homedir, totalmem } from "node:os"
 import { join } from "node:path"
 import * as Log from "@opencode-ai/core/util/log"
 import { SWARM_DEFAULTS } from "./defaults"
 
 const log = Log.create({ service: "swarm.worker" })
 const RESTART_DELAY_MS = 30_000
+
+/**
+ * Construit l'environnement pour le worker Parallax avec des defaults
+ * adaptés à l'hôte. Sur Apple silicon avec mémoire unifiée partagée
+ * (Mac mini / MacBook 16-32 GB), les defaults Parallax (max-batch-size=8,
+ * max-sequence-length=32768) provoquent un OOM Metal au premier prompt
+ * lourd : Metal alloue les buffers GPU à hauteur de batch × seq, ce qui
+ * sur 16 GB de RAM unifiée dépasse ce que le driver accepte. On force
+ * des limites conservatrices pour le single-user perso. Les valeurs déjà
+ * définies par l'utilisateur sont respectées (FABI_* ou PARALLAX_*).
+ */
+function buildWorkerEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  const isAppleSilicon =
+    process.platform === "darwin" && process.arch === "arm64"
+  if (!isAppleSilicon) return env
+
+  const ramGb = Math.round(totalmem() / 2 ** 30)
+  // À 64 GB+ on suppose une station/serveur dédié, on garde les defaults Parallax.
+  if (ramGb >= 64) return env
+
+  const setIfUnset = (key: string, value: string) => {
+    if (!env[key]?.trim()) env[key] = value
+  }
+  // Valeurs validées sur M4 16 GB. Pour 32 GB Apple silicon on relâche un peu.
+  if (ramGb <= 24) {
+    setIfUnset("PARALLAX_MAX_BATCH_SIZE", "1")
+    setIfUnset("PARALLAX_MAX_SEQUENCE_LENGTH", "16384")
+    setIfUnset("PARALLAX_MAX_NUM_TOKENS_PER_BATCH", "8192")
+    setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", "4")
+  } else {
+    setIfUnset("PARALLAX_MAX_BATCH_SIZE", "2")
+    setIfUnset("PARALLAX_MAX_SEQUENCE_LENGTH", "32768")
+    setIfUnset("PARALLAX_MAX_NUM_TOKENS_PER_BATCH", "16384")
+    setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", "6")
+  }
+  return env
+}
+
+/**
+ * Tue les workers Parallax orphelins qui pourraient avoir survécu à un
+ * crash précédent de fabi (TUI freeze, kill -9 du parent sans cleanup).
+ * Le `detached: true` du spawn rend ces processus indépendants ; sans
+ * cleanup pré-spawn on se retrouve avec deux workers en parallèle qui
+ * se partagent la RAM et provoquent un OOM Metal sur Apple silicon.
+ */
+function killOrphanedWorkers(currentPid: number): void {
+  if (process.platform === "win32") return
+  // pgrep -f matche n'importe quel argument de la ligne de commande, on cible
+  // explicitement le launch.py pour ne pas attraper d'autres outils homonymes.
+  const r = spawnSync("pgrep", ["-f", "parallax/launch.py"], {
+    encoding: "utf8",
+  })
+  if (r.status !== 0 || !r.stdout) return
+  const pids = r.stdout
+    .split(/\s+/)
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isFinite(n) && n !== currentPid && n !== process.pid)
+  if (pids.length === 0) return
+  log.warn("found orphaned parallax workers, terminating", { pids })
+  for (const orphan of pids) {
+    try {
+      process.kill(-orphan, "SIGTERM")
+    } catch {
+      try {
+        process.kill(orphan, "SIGTERM")
+      } catch {
+        /* déjà mort */
+      }
+    }
+  }
+  // Court délai puis SIGKILL si toujours en vie. spawnSync sleep car on est
+  // dans une fonction synchrone appelée juste avant le spawn.
+  spawnSync("sh", ["-c", "sleep 2"])
+  for (const orphan of pids) {
+    try {
+      process.kill(-orphan, "SIGKILL")
+    } catch {
+      /* déjà mort */
+    }
+  }
+}
 
 export type WorkerStatus =
   | { kind: "starting" }
@@ -114,6 +196,12 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     return null
   }
 
+  // Avant de spawn, nettoie d'éventuels workers orphelins d'un précédent
+  // crash de fabi. Sans ça, les processes detached survivent et on se
+  // retrouve avec deux workers en concurrence sur la même RAM (cas réel
+  // observé sur Mac mini M4 → OOM Metal).
+  killOrphanedWorkers(process.pid)
+
   // `parallax join -s` veut une PeerID Lattica/multiaddr (pas une URL HTTP).
   const args = ["join", "-s", schedulerPeer]
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
@@ -129,7 +217,7 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     const next = spawn(bin, args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
-      env: process.env,
+      env: buildWorkerEnv(),
     })
     next.unref?.()
 

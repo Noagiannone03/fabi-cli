@@ -13,11 +13,14 @@
 //   1. venv bundlé dans le tarball Fabi (runtime/parallax-venv/) — court-circuit total
 //   2. env FABI_PARALLAX_SOURCE  (override explicite, accepte path local OU URL git)
 //   3. clone local du fork swarm-engine si dispo (= dev local du méta-projet)
-//   4. git clone GradientHQ/parallax dans ~/.local/share/fabi/runtime/parallax-src/
-//      puis pip install -e . — IMPORTANT : on passe par un clone + editable
-//      car le pyproject.toml upstream a un build-backend poetry-core qui ignore
-//      les sous-packages en mode wheel (`pip install git+https://`). Le mode
-//      editable expose le source dir via .pth → tous les sous-packages visibles.
+//   4. git clone Noagiannone03/swarm-engine (notre fork patché de Parallax)
+//      dans ~/.local/share/fabi/runtime/parallax-src/ puis pip install -e .
+//      IMPORTANT : on passe par un clone + editable car le pyproject.toml
+//      upstream a un build-backend poetry-core qui ignore les sous-packages
+//      en mode wheel (`pip install git+https://`). Le mode editable expose
+//      le source dir via .pth → tous les sous-packages visibles.
+//      Le fork swarm-engine contient les fixes Fabi (heartbeat configurable,
+//      détection mémoire utilisable, bootstrap cohérent, need_more_nodes…).
 
 import { spawn } from "node:child_process"
 import { existsSync, mkdirSync } from "node:fs"
@@ -151,14 +154,19 @@ interface SourceInfo {
   localPath: string
   /** URL git si on doit cloner (sinon undefined = path déjà prêt). */
   cloneUrl?: string
+  /** Branche/tag/commit à checkout (passé à `git clone --branch`). */
+  cloneRef?: string
   /** Description user-friendly pour le prompt. */
   display: string
 }
 
-const UPSTREAM_PARALLAX_GIT = "https://github.com/GradientHQ/parallax.git"
+// Fork Fabi de Parallax. Branche `fabi-patches` = upstream main + nos commits
+// (heartbeat configurable, détection mémoire utilisable, bootstrap cohérent…).
+const FORK_PARALLAX_GIT = "https://github.com/Noagiannone03/swarm-engine.git"
+const FORK_PARALLAX_REF = "fabi-patches"
 
 function resolveSource(): SourceInfo {
-  // 1. Override explicite via env
+  // 1. Override explicite via env (path local OU URL git)
   const envSource = process.env.FABI_PARALLAX_SOURCE?.trim()
   if (envSource) {
     // Chemin local → utilisable directement
@@ -168,10 +176,12 @@ function resolveSource(): SourceInfo {
     }
     // URL git (https/git+https/ssh) → on clone ce fork
     const cloneUrl = envSource.replace(/^git\+/, "")
+    const cloneRef = process.env.FABI_PARALLAX_REF?.trim() || undefined
     return {
       localPath: join(installRoot(), "parallax-src"),
       cloneUrl,
-      display: `git clone : ${cloneUrl}`,
+      cloneRef,
+      display: `git clone : ${cloneUrl}${cloneRef ? `@${cloneRef}` : ""}`,
     }
   }
 
@@ -183,14 +193,18 @@ function resolveSource(): SourceInfo {
     return { localPath: localFork, display: `clone local : ${localFork}` }
   }
 
-  // 3. Fallback : on clone Parallax upstream dans ~/.local/share/fabi/runtime/parallax-src/
-  // puis pip install -e . (editable). Le mode editable contourne le bug de packaging
-  // upstream (pyproject.toml poetry-core ignore les sous-packages parallax_utils,
-  // scheduling, parallax_extensions en mode wheel).
+  // 3. Fallback : on clone le fork swarm-engine dans
+  // ~/.local/share/fabi/runtime/parallax-src/ puis pip install -e . (editable).
+  // Le mode editable contourne le bug de packaging upstream (pyproject.toml
+  // poetry-core ignore les sous-packages parallax_utils, scheduling,
+  // parallax_extensions en mode wheel).
+  // FABI_PARALLAX_REF peut overrider la branche pinnée.
+  const cloneRef = process.env.FABI_PARALLAX_REF?.trim() || FORK_PARALLAX_REF
   return {
     localPath: join(installRoot(), "parallax-src"),
-    cloneUrl: UPSTREAM_PARALLAX_GIT,
-    display: `git clone : ${UPSTREAM_PARALLAX_GIT}`,
+    cloneUrl: FORK_PARALLAX_GIT,
+    cloneRef,
+    display: `git clone : ${FORK_PARALLAX_GIT}@${cloneRef}`,
   }
 }
 
@@ -388,9 +402,14 @@ export async function tryInstallParallax(): Promise<InstallResult> {
       }
     } else {
       process.stderr.write(
-        `${info}[fabi installer]${reset} Clonage de Parallax depuis ${source.cloneUrl}…\n`,
+        `${info}[fabi installer]${reset} Clonage de Parallax depuis ${source.cloneUrl}${
+          source.cloneRef ? `@${source.cloneRef}` : ""
+        }…\n`,
       )
-      const cloneCode = await streamCmd("git", ["clone", "--depth=1", source.cloneUrl, source.localPath])
+      const cloneArgs = ["clone", "--depth=1"]
+      if (source.cloneRef) cloneArgs.push("--branch", source.cloneRef)
+      cloneArgs.push(source.cloneUrl, source.localPath)
+      const cloneCode = await streamCmd("git", cloneArgs)
       if (cloneCode !== 0) {
         return {
           ok: false,
