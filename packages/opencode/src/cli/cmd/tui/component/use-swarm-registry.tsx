@@ -16,7 +16,11 @@ import type { RegistrySwarm } from "@/swarm/registry"
 import { fetchRegistrySwarms } from "@/swarm/registry"
 import { SWARM_DEFAULTS } from "@/swarm/defaults"
 
-const POLL_INTERVAL_MS = 5_000
+// Le registry rafraîchit toutes les 10s côté serveur ; un poll plus rapide
+// que ça côté TUI ne fait que dépenser CPU/wifi/batterie sans information
+// neuve. 15s est un compromis : l'indicateur live reste vivant, le Mac ne
+// chauffe pas, et on évite de tirer sur le scan Docker du registry.
+const POLL_INTERVAL_MS = 15_000
 const FETCH_TIMEOUT_MS = 2_500
 
 function resolveRegistryUrl(): string {
