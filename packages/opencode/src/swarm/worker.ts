@@ -10,6 +10,7 @@ import { homedir, totalmem } from "node:os"
 import { join } from "node:path"
 import * as Log from "@opencode-ai/core/util/log"
 import { SWARM_DEFAULTS } from "./defaults"
+import { inspectManagedSource } from "./installer"
 
 const log = Log.create({ service: "swarm.worker" })
 const RESTART_DELAY_MS = 30_000
@@ -196,6 +197,33 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     return null
   }
 
+  // Diagnostic explicite : on logge le chemin résolu + la version du clone
+  // source du fork. Sans ça, un user qui a un `parallax` upstream dans son
+  // PATH ou un clone obsolète tourne avec les anciens defaults
+  // (--max-num-tokens-per-batch 4096, --max-sequence-length 7168) et passe
+  // des heures à se demander pourquoi il a des bugs déjà corrigés. Le
+  // refresh paresseux du clone se fait dans installer.ts ; ici on lit juste
+  // l'état pour le rendre visible.
+  const fabiRuntimeRoot = join(
+    process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"),
+    "fabi",
+    "runtime",
+  )
+  const isManagedBin = bin.startsWith(fabiRuntimeRoot)
+  const sourceState = await inspectManagedSource().catch(() => null)
+  log.info("spawning parallax worker", {
+    bin,
+    isManagedBin,
+    sourceCommit: sourceState?.afterSha ?? sourceState?.beforeSha ?? null,
+    sourceUpdated: sourceState?.updated ?? false,
+  })
+  if (!isManagedBin) {
+    log.warn(
+      "parallax bin is OUTSIDE the fabi-managed runtime — patches Fabi (heartbeat, batch limits, fix scheduler) absent",
+      { bin, expectedRoot: fabiRuntimeRoot },
+    )
+  }
+
   // Avant de spawn, nettoie d'éventuels workers orphelins d'un précédent
   // crash de fabi. Sans ça, les processes detached survivent et on se
   // retrouve avec deux workers en concurrence sur la même RAM (cas réel
@@ -212,7 +240,7 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
 
   const startChild = (): boolean => {
     onStatus?.({ kind: "starting" })
-    log.info("spawning parallax worker", { bin, args })
+    log.info("starting parallax worker child", { args })
 
     const next = spawn(bin, args, {
       stdio: ["ignore", "pipe", "pipe"],

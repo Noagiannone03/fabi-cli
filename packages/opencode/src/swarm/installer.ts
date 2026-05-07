@@ -209,6 +209,90 @@ function resolveSource(): SourceInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Synchro paresseuse du clone source (mode chaud)
+// ---------------------------------------------------------------------------
+
+export interface SourceRefresh {
+  /** Path du clone, ou null si la source n'est pas un clone géré. */
+  localPath: string | null
+  /** Branche/ref sur laquelle pointe la source attendue. */
+  expectedRef: string | null
+  /** SHA HEAD avant pull (court). */
+  beforeSha: string | null
+  /** SHA HEAD après pull (court). null si pull skip ou KO. */
+  afterSha: string | null
+  /** True si on a effectivement pull/fetch des nouveaux commits. */
+  updated: boolean
+  /** Raison si on a skip (pas un clone, override env, fetch KO, etc.). */
+  skipReason?: string
+}
+
+async function shaShort(repoPath: string): Promise<string | null> {
+  const r = await captureCmd("git", ["-C", repoPath, "rev-parse", "--short=8", "HEAD"])
+  if (r.exitCode !== 0) return null
+  return r.stdout.trim() || null
+}
+
+/**
+ * Met à jour le clone géré du fork swarm-engine si on est derrière le remote.
+ * Ne fait rien si la source vient d'un override `FABI_PARALLAX_SOURCE` local
+ * (= clone de dev), ou si ce n'est pas un git clone.
+ *
+ * Best-effort : un échec réseau ou un git pull qui foire ne bloque pas le
+ * lancement de fabi — l'utilisateur garde sa version actuelle.
+ */
+async function refreshSourceClone(): Promise<SourceRefresh> {
+  const source = resolveSource()
+  // Si pas une URL de clone (override local user), on touche à rien.
+  if (!source.cloneUrl) {
+    return {
+      localPath: source.localPath,
+      expectedRef: null,
+      beforeSha: existsSync(join(source.localPath, ".git"))
+        ? await shaShort(source.localPath)
+        : null,
+      afterSha: null,
+      updated: false,
+      skipReason: "source-is-local-checkout",
+    }
+  }
+
+  if (!existsSync(join(source.localPath, ".git"))) {
+    return {
+      localPath: source.localPath,
+      expectedRef: source.cloneRef ?? null,
+      beforeSha: null,
+      afterSha: null,
+      updated: false,
+      skipReason: "no-managed-clone",
+    }
+  }
+
+  const beforeSha = await shaShort(source.localPath)
+  // Le clone a été initialisé via `git clone --branch <ref>` donc la branche
+  // courante suit déjà `origin/<ref>`. `git pull --ff-only --quiet` sans
+  // args additionnels respecte ce tracking, et bail-out propre si l'user
+  // a divergé manuellement (commits locaux, branche switchée). On ne
+  // tente pas de réparer — on log et l'user reste sur sa version.
+  const pull = await captureCmd("git", ["-C", source.localPath, "pull", "--ff-only", "--quiet"])
+  const afterSha = await shaShort(source.localPath)
+  const updated = !!(beforeSha && afterSha && beforeSha !== afterSha)
+  return {
+    localPath: source.localPath,
+    expectedRef: source.cloneRef ?? null,
+    beforeSha,
+    afterSha,
+    updated,
+    skipReason: pull.exitCode !== 0 ? `git-pull-failed (${pull.stderr.trim().slice(0, 120)})` : undefined,
+  }
+}
+
+/** Wrapper public pour worker.ts (diagnostic au boot). */
+export async function inspectManagedSource(): Promise<SourceRefresh> {
+  return refreshSourceClone()
+}
+
+// ---------------------------------------------------------------------------
 // Détection des extras pip selon la plateforme
 // ---------------------------------------------------------------------------
 
@@ -315,21 +399,34 @@ async function confirm(question: string, defaultYes = true): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 /**
- * Tente d'installer Parallax dans `~/.local/share/fabi/runtime/.venv/`.
+ * Tente d'installer (ou mettre à jour) Parallax dans
+ * `~/.local/share/fabi/runtime/.venv/`.
  *
- * - Si le binaire est déjà installé → renvoie son path sans rien faire
- * - Sinon : prompt user → si oui, lance `python -m venv` puis `pip install`
- * - Streame le progress de pip directement sur le terminal user
+ * - Si le binaire est déjà installé ET le clone source est à jour → renvoie
+ *   son path immédiatement (cas chaud le plus fréquent)
+ * - Si le binaire est installé MAIS le clone source est en retard sur le
+ *   remote → pull silencieux du fork (le mode editable expose le source
+ *   dir, donc un git pull suffit pour propager les patches Fabi)
+ * - Si le binaire manque → prompt user → `python -m venv` puis `pip install`
  *
- * **Bloquant** : peut prendre 5-15 min selon la connexion (PyTorch est gros).
- * L'utilisateur voit le progress et peut Ctrl+C.
+ * **Pourquoi le auto-pull** : sans ça, un user qui a installé Fabi avant un
+ * patch du fork (ex: bump des limites worker `--max-num-tokens-per-batch`,
+ * `--max-sequence-length`) tourne indéfiniment sur l'ancienne version et
+ * voit des bugs déjà corrigés upstream du fork.
+ *
+ * Streame le progress de pip directement sur le terminal user.
+ *
+ * **Bloquant** : 5-15 min en cold install (PyTorch), ~1s en update à chaud.
  */
 export async function tryInstallParallax(): Promise<InstallResult> {
   const binPath = managedParallaxBin()
 
-  // Déjà installé ? On retourne tout de suite.
+  // Déjà installé : on s'assure quand même que le clone source est à jour
+  // (le binaire est un wrapper editable qui appelle le source dir, donc un
+  // git pull suffit pour appliquer les nouveaux patches du fork).
   if (existsSync(binPath)) {
-    log.info("parallax already installed in managed venv", { binPath })
+    const refresh = await refreshSourceClone()
+    log.info("parallax already installed in managed venv", { binPath, refresh })
     return { ok: true, binPath }
   }
 
