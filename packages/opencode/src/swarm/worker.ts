@@ -291,6 +291,7 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     "join",
     "-s",
     schedulerPeer,
+    "-r",
     "--max-batch-size", limits.maxBatchSize,
     "--max-sequence-length", limits.maxSequenceLength,
     "--max-num-tokens-per-batch", limits.maxNumTokensPerBatch,
