@@ -12,18 +12,27 @@
 import { createSignal, onCleanup, onMount } from "solid-js"
 
 /**
- * Renvoie un getter qui cycle à travers `words` toutes les `intervalMs`.
- * L'index repart à 0 en boucle. Premier mot affiché immédiatement (pas
- * d'attente d'un tick avant le premier rendu).
+ * Renvoie un getter qui cycle à travers les mots toutes les `intervalMs`.
+ *
+ * Accepte SOIT un tableau statique, SOIT un getter (() => liste). Avec un
+ * getter, on relit la liste à chaque tick — utile pour cycler sur une
+ * liste qui dépend de l'état réactif (ex: phase de chargement courante).
+ *
+ * L'index repart à 0 en boucle. Premier mot affiché immédiatement.
  */
-export function useCyclingWord(words: readonly string[], intervalMs: number = 2200): () => string {
+export function useCyclingWord(
+  words: readonly string[] | (() => readonly string[]),
+  intervalMs: number = 2200,
+): () => string {
+  const getter: () => readonly string[] = typeof words === "function" ? words : () => words
   const [i, setI] = createSignal(0)
   let timer: ReturnType<typeof setInterval> | null = null
 
   onMount(() => {
-    if (words.length <= 1) return
     timer = setInterval(() => {
-      setI((v) => (v + 1) % words.length)
+      const list = getter()
+      if (list.length <= 1) return
+      setI((v) => (v + 1) % list.length)
     }, intervalMs)
   })
 
@@ -31,7 +40,11 @@ export function useCyclingWord(words: readonly string[], intervalMs: number = 22
     if (timer) clearInterval(timer)
   })
 
-  return () => words[i()] ?? words[0] ?? ""
+  return () => {
+    const list = getter()
+    if (list.length === 0) return ""
+    return list[i() % list.length] ?? list[0]!
+  }
 }
 
 /**

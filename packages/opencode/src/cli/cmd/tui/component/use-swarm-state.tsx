@@ -22,18 +22,49 @@ import { useSchedulerStatus, type SchedulerStatusDetail } from "./use-scheduler-
  * Une raison concrète pour laquelle le swarm n'est pas prêt. Le SwarmGate
  * itère dessus pour afficher des bullets actionnables à l'utilisateur.
  *
- * Ordre conceptuel (du plus "tôt dans le boot" au plus "presque prêt") :
- *   worker-not-started → scheduler-unreachable → need-more-peers →
- *   loading-model → pipeline-not-ready
+ * Sémantique alignée sur le code Parallax (cf swarm-engine/src/scheduling) :
+ *
+ *   NodeState.ACTIVE  ⇔  node alloué à un pipeline (porte des layers)
+ *   NodeState.STANDBY ⇔  node connecté mais en réserve (rien à servir)
+ *
+ *   node.is_active === True   ⇔  node a fini son refit → prêt à servir
+ *   node.is_active === False  ⇔  jamais alloué OU en train de refit
+ *
+ *   cluster.status === "available"  ⇔  has_full_pipeline() : il existe au
+ *                                       moins UNE chaîne de nodes ACTIVE
+ *                                       couvrant tous les layers (même si
+ *                                       ces nodes sont encore en refit)
+ *   cluster.status === "waiting"    ⇔  aucune chaîne complète allocable
+ *
+ *   /cluster/status_json.node_list  =  TOUS les nodes (ACTIVE et STANDBY)
+ *                                      avec `status` dérivé de `is_active`
+ *
+ * **Conséquence importante** : si M4 Pro (ACTIVE, is_active=True) porte
+ * tout le modèle et M3 (STANDBY, is_active=False) est en redondance, on a
+ * `node_list = [{status: "available"}, {status: "waiting"}]`. Le swarm
+ * PEUT servir (le pipeline est formé et ready côté M4), mais une logique
+ * naïve "nodesWaiting > 0 → loading" garderait le popup ouvert à tort.
+ *
+ * Règle correcte pour "ready à chatter" :
+ *   cluster.status === "available"  ET  au moins UN node is_active=True
+ *
+ * Règle pour "encore en refit / téléchargement" :
+ *   cluster.status === "available"  ET  AUCUN node is_active=True yet
+ *   → c'est le cas du premier boot où le pipeline est alloué mais le node
+ *     porteur n'a pas encore fini de charger ses layers.
+ *
+ * `need_more_nodes` exposé par /cluster/status_json est volontairement
+ * IGNORÉ : il flippe à False dès le premier bootstrap (même raté), donc
+ * il ment dans le cas typique "j'ai pas assez de capacité pour ce modèle".
  */
 export type SwarmBlockingReason =
   | { kind: "worker-not-started"; phase: SwarmWorkerPhase }
   | { kind: "worker-crashed"; lastError?: string }
   | { kind: "worker-missing-binary" }
   | { kind: "scheduler-unreachable" }
+  | { kind: "connecting-to-swarm" }
   | { kind: "need-more-peers"; nodesTotal: number }
   | { kind: "loading-model"; nodesWaiting: number; nodesTotal: number }
-  | { kind: "pipeline-not-ready"; clusterStatus: string }
 
 export interface SwarmStateDetail {
   /** True ssi aucune raison bloquante n'est présente. */
@@ -69,36 +100,51 @@ function deriveReasons(
       reasons.push({ kind: "worker-crashed", lastError: worker.lastError })
     } else if (worker.phase === "idle" || worker.phase === "starting" || worker.phase === "stopped") {
       reasons.push({ kind: "worker-not-started", phase: worker.phase })
+      // Quand le worker n'est pas encore running, le reste n'a pas de
+      // sens : on retourne tôt pour ne pas afficher 4 raisons en cascade.
+      return reasons
     }
-    // running → on n'ajoute rien, c'est le scheduler qui dira si on est ready
+    // running → on n'ajoute rien ici, le scheduler dira si on est ready
   }
 
   // --- Scheduler distant ---
   // Tant que le premier fetch n'a pas répondu, on évite de gueuler
   // "unreachable" — on attend silencieusement.
-  if (!sched.reachable && !schedLoading) {
-    reasons.push({ kind: "scheduler-unreachable" })
+  if (!sched.reachable) {
+    if (!schedLoading) reasons.push({ kind: "scheduler-unreachable" })
+    return reasons
   }
 
-  if (sched.reachable) {
-    const nodesTotal = sched.nodes.length
-    const nodesWaiting = sched.nodes.filter((n) => n.status !== "available").length
+  const nodesTotal = sched.nodes.length
+  const nodesActive = sched.nodes.filter((n) => n.status === "available").length
 
-    if (sched.needMoreNodes) {
-      reasons.push({ kind: "need-more-peers", nodesTotal })
+  // --- Pipeline formé côté scheduler ---
+  if (sched.status === "available") {
+    // Au moins un node a fini son refit ⇒ le pipeline est servable.
+    // Les autres nodes "waiting" sont soit en STANDBY (réserve, pas
+    // dans le pipeline), soit en cours de refit dans un autre pipeline
+    // (multi-shard) — ni l'un ni l'autre ne nous empêche de chatter.
+    if (nodesActive > 0) {
+      return reasons // pas de raison bloquante restante → ready
     }
-    if (nodesWaiting > 0) {
-      reasons.push({ kind: "loading-model", nodesWaiting, nodesTotal })
-    }
-    // Cluster status n'est pas "available" mais on n'a pas trouvé de raison
-    // plus précise (rare cas où pipeline pas formé mais pas de waiting nodes).
-    if (
-      sched.status &&
-      sched.status !== "available" &&
-      reasons.length === 0
-    ) {
-      reasons.push({ kind: "pipeline-not-ready", clusterStatus: sched.status })
-    }
+    // Pipeline alloué mais AUCUN node n'a encore terminé son refit :
+    // c'est le boot initial après allocation, on télécharge le modèle.
+    reasons.push({ kind: "loading-model", nodesWaiting: nodesTotal, nodesTotal })
+    return reasons
+  }
+
+  // --- cluster.status === "waiting" : pipeline non formé ---
+  if (nodesTotal === 0) {
+    // Personne n'est encore visible côté scheduler. Soit notre worker
+    // n'a pas fini son handshake Lattica/P2P (cas usuel), soit le swarm
+    // est vraiment vide. Dans les deux cas → "connecting".
+    reasons.push({ kind: "connecting-to-swarm" })
+  } else {
+    // Des peers sont là mais l'allocation a échoué à produire un
+    // pipeline complet (capacité insuffisante par rapport au nombre de
+    // layers du modèle). Cas typique : tu rejoins seul un swarm avec un
+    // modèle plus gros que ce que ton GPU peut porter.
+    reasons.push({ kind: "need-more-peers", nodesTotal })
   }
 
   return reasons

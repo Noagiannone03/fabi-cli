@@ -25,17 +25,38 @@ import { useSwarmState, type SwarmBlockingReason } from "./use-swarm-state"
 import { formatElapsed, useAnimatedDots, useCyclingWord, useElapsedSeconds } from "./cycling-text"
 
 /**
- * Mots de chargement qui cyclent toutes les ~2.5s sous le headline.
- * Ordre choisi pour suggérer une progression (download → load → init →
- * boot) sans jamais mentir : ces 4 verbes décrivent réellement ce qui se
- * passe au worker pendant la phase de refit.
+ * Mots de chargement contextuels — on choisit la liste selon la phase
+ * réelle. Ça évite d'afficher "Downloading model" quand en fait notre
+ * worker n'a même pas fini son handshake P2P.
  */
-const LOADING_WORDS = [
+const WORDS_LOADING_MODEL = [
   "Downloading model",
   "Loading layers",
-  "Initializing pipeline",
-  "Booting swarm",
+  "Refitting weights",
+  "Booting workers",
 ] as const
+
+const WORDS_JOINING = [
+  "Connecting to scheduler",
+  "Negotiating P2P relay",
+  "Announcing on Lattica",
+  "Discovering peers",
+] as const
+
+const WORDS_STARTING = [
+  "Starting your worker",
+  "Spawning Parallax",
+  "Preparing GPU",
+] as const
+
+function pickWordList(reasons: SwarmBlockingReason[]): readonly string[] {
+  if (reasons.some((r) => r.kind === "loading-model")) return WORDS_LOADING_MODEL
+  if (reasons.some((r) => r.kind === "connecting-to-swarm")) return WORDS_JOINING
+  if (reasons.some((r) => r.kind === "worker-not-started")) return WORDS_STARTING
+  // Fallback : on garde les mots "loading model" comme défaut générique
+  // (cas où une autre raison non-critique a été ajoutée plus tard).
+  return WORDS_LOADING_MODEL
+}
 
 /**
  * Décide si le gate doit s'afficher en plein écran (popup). On masque le
@@ -55,13 +76,15 @@ function shouldShowPopup(reasons: SwarmBlockingReason[]): boolean {
 function pickHeadline(reasons: SwarmBlockingReason[]): string {
   if (reasons.length === 0) return "Ready"
 
-  // Priorité : missing-binary > crashed > scheduler-unreachable > worker-not-started
+  // Priorité descendante. Le premier match gagne.
   if (reasons.some((r) => r.kind === "worker-missing-binary")) return "Parallax not installed"
   if (reasons.some((r) => r.kind === "worker-crashed")) return "Restarting worker"
-  if (reasons.some((r) => r.kind === "scheduler-unreachable")) return "Connecting"
-  if (reasons.some((r) => r.kind === "worker-not-started")) return "Starting"
-
-  // Cas nominal : on charge / on initialise.
+  if (reasons.some((r) => r.kind === "scheduler-unreachable")) return "Connecting to swarm"
+  if (reasons.some((r) => r.kind === "worker-not-started")) return "Starting your worker"
+  if (reasons.some((r) => r.kind === "connecting-to-swarm")) return "Joining the swarm"
+  if (reasons.some((r) => r.kind === "loading-model")) return "Downloading model"
+  // need-more-peers est géré INLINE (sans popup) ; on n'arrive normalement
+  // pas ici. Fallback générique pour ne pas planter sur un état imprévu.
   return "Setting up your model"
 }
 
@@ -89,7 +112,9 @@ export function SwarmGate() {
   const visible = createMemo(() => shouldShowPopup(state().reasons))
   const headline = createMemo(() => pickHeadline(state().reasons))
   const criticalDetail = createMemo(() => pickCriticalDetail(state().reasons))
-  const cyclingWord = useCyclingWord(LOADING_WORDS)
+  // Liste de mots cyclants choisie réactivement selon la phase — getter
+  // passé à useCyclingWord qui relit la liste à chaque tick.
+  const cyclingWord = useCyclingWord(() => pickWordList(state().reasons))
   const dots = useAnimatedDots()
 
   // Timer écoulé depuis l'apparition du gate. Reset automatique quand
