@@ -81,10 +81,11 @@ function pickHeadline(reasons: SwarmBlockingReason[]): string {
   // Priorité descendante. Le premier match gagne.
   if (reasons.some((r) => r.kind === "worker-missing-binary")) return "Parallax not installed"
   if (reasons.some((r) => r.kind === "worker-crashed")) return "Restarting worker"
+  if (reasons.some((r) => r.kind === "alloc-timeout")) return "Allocation timed out"
   if (reasons.some((r) => r.kind === "scheduler-unreachable")) return "Connecting to swarm"
   if (reasons.some((r) => r.kind === "worker-not-started")) return "Starting your worker"
   if (reasons.some((r) => r.kind === "connecting-to-swarm")) return "Joining the swarm"
-  if (reasons.some((r) => r.kind === "loading-model")) return "Downloading model"
+  if (reasons.some((r) => r.kind === "loading-model")) return "Loading model"
   // need-more-peers est géré INLINE (sans popup) ; on n'arrive normalement
   // pas ici. Fallback générique pour ne pas planter sur un état imprévu.
   return "Setting up your model"
@@ -103,6 +104,9 @@ function pickCriticalDetail(reasons: SwarmBlockingReason[]): string | null {
   if (reasons.some((r) => r.kind === "worker-missing-binary")) {
     return "Run the install script to add Parallax to this machine."
   }
+  if (reasons.some((r) => r.kind === "alloc-timeout")) {
+    return "The scheduler did not assign layers within 300s. Worker is restarting; check that peers are joining."
+  }
   return null
 }
 
@@ -115,8 +119,20 @@ function pickInfoSubline(reasons: SwarmBlockingReason[]): string | null {
   const loading = reasons.find((r) => r.kind === "loading-model")
   if (loading && loading.kind === "loading-model") {
     const parts: string[] = []
+    // Vrai progress depuis les events worker — gagne sur tout le reste.
+    if (
+      loading.filesTotal !== undefined &&
+      loading.filesTotal > 0 &&
+      loading.filesDone !== undefined
+    ) {
+      const pct = Math.min(
+        100,
+        Math.floor((loading.filesDone / loading.filesTotal) * 100),
+      )
+      parts.push(`${loading.filesDone}/${loading.filesTotal} files · ${pct}%`)
+    }
     if (loading.layersAssigned !== undefined && loading.layersAssigned > 0) {
-      parts.push(`${loading.layersAssigned} layers to load`)
+      parts.push(`${loading.layersAssigned} layers assigned`)
     }
     if (loading.nodesInitializing > 0 && loading.nodesTotal > 1) {
       parts.push(`${loading.nodesInitializing}/${loading.nodesTotal} peers initializing`)

@@ -30,6 +30,29 @@ export type SwarmWorkerPhase =
   | "missing-binary"
   | "no-parallax"
 
+/**
+ * Sous-phase fine du worker, dérivée des events `[FABI] {...}` que le binaire
+ * Parallax (notre fork) émet sur stdout. Vue plus précise que `phase` :
+ * `phase=running` couvre tout depuis "process spawné" jusqu'à "ready",
+ * `workerStage` raconte CE qu'il fait actuellement.
+ *
+ *   handshake        — Lattica build / DHT discovery (avant peer_id)
+ *   joining          — node_join RPC envoyé, on attend la réponse scheduler
+ *   alloc-timeout    — node_join a renvoyé {} après 300s : scheduler n'a pas
+ *                      pu nous allouer de layers. Le worker va exit.
+ *   loading-weights  — allocation reçue, on charge les safetensors en RAM/GPU
+ *   ready            — modèle chargé, MLX prêt à servir
+ *
+ * Null tant qu'on n'a reçu aucun event (binaire upstream non patché, ou
+ * worker pas encore démarré).
+ */
+export type SwarmWorkerStage =
+  | "handshake"
+  | "joining"
+  | "alloc-timeout"
+  | "loading-weights"
+  | "ready"
+
 export interface SwarmActiveState {
   /** Phase courante du worker local. */
   phase: SwarmWorkerPhase
@@ -47,6 +70,18 @@ export interface SwarmActiveState {
   lastError?: string
   /** Entrée registry choisie (snapshot au moment du start). */
   registryEntry?: RegistrySwarm | null
+
+  // --- Champs dérivés des events `[FABI] {...}` du worker ---
+  /** Peer ID Lattica de notre worker, défini après `Lattica.build()`. */
+  workerPeerId?: string
+  /** Sous-phase fine, plus précise que `phase`. */
+  workerStage?: SwarmWorkerStage
+  /** Layers alloués à notre worker (inclusif/exclusif). */
+  workerStartLayer?: number
+  workerEndLayer?: number
+  /** Progress de chargement des safetensors (0..total). */
+  weightsFilesDone?: number
+  weightsFilesTotal?: number
 }
 
 let state: SwarmActiveState = { phase: "idle" }

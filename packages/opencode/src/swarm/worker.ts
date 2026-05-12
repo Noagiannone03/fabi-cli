@@ -10,6 +10,7 @@ import { homedir, totalmem } from "node:os"
 import { join } from "node:path"
 import * as Log from "@opencode-ai/core/util/log"
 import { SWARM_DEFAULTS } from "./defaults"
+import { FabiEventStream } from "./events"
 import { inspectManagedSource } from "./installer"
 
 const log = Log.create({ service: "swarm.worker" })
@@ -327,35 +328,34 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
 
     const startedAt = Date.now()
     const lastOutput: string[] = []
-    const rememberOutput = (prefix: string, chunk: Buffer): void => {
-      const text = chunk.toString().trimEnd()
+    const rememberOutput = (prefix: string, line: string): void => {
+      if (!line) return
+      lastOutput.push(`${prefix}${line}`)
+      if (lastOutput.length > 40) lastOutput.shift()
+    }
+
+    // Parser stdout — les events `[FABI] {...}` sont absorbés et propagés
+    // dans le state singleton, le reste est buffer-isé pour le ring + verbose.
+    // (Seul stdout porte les events ; stderr garde le ring buffer brut.)
+    const stdoutParser = new FabiEventStream((line) => {
+      rememberOutput("", line)
+      if (verbose) process.stderr.write(`\x1b[2m[parallax] ${line}\x1b[0m\n`)
+    })
+
+    next.stdout?.on("data", (d: Buffer) => stdoutParser.ingest(d))
+    next.stderr?.on("data", (d: Buffer) => {
+      const text = d.toString().trimEnd()
       if (!text) return
       for (const line of text.split(/\r?\n/)) {
-        lastOutput.push(`${prefix}${line}`)
-        if (lastOutput.length > 40) lastOutput.shift()
+        rememberOutput("stderr: ", line)
+        if (verbose) process.stderr.write(`\x1b[2m[parallax!] ${line}\x1b[0m\n`)
       }
-    }
-
-    if (verbose) {
-      next.stdout?.on("data", (d: Buffer) => {
-        rememberOutput("", d)
-        const text = d.toString().trimEnd()
-        if (text) process.stderr.write(`\x1b[2m[parallax] ${text}\x1b[0m\n`)
-      })
-      next.stderr?.on("data", (d: Buffer) => {
-        rememberOutput("stderr: ", d)
-        const text = d.toString().trimEnd()
-        if (text) process.stderr.write(`\x1b[2m[parallax!] ${text}\x1b[0m\n`)
-      })
-    } else {
-      // On lit les flux pour ne pas remplir le pipe et bloquer Parallax, tout en
-      // gardant un petit ring buffer. Parallax peut sortir code=0 même après une
-      // exception interne, donc ces lignes sont nécessaires pour diagnostiquer.
-      next.stdout?.on("data", (d: Buffer) => rememberOutput("", d))
-      next.stderr?.on("data", (d: Buffer) => rememberOutput("stderr: ", d))
-    }
+    })
 
     next.on("close", (code, signal) => {
+      // Vide le buffer du parser pour ne pas perdre un éventuel dernier event
+      // (alloc_timeout, weights_load_done) émis juste avant un exit/SIGTERM.
+      stdoutParser.flush()
       const runtimeMs = Date.now() - startedAt
       if (stopped) {
         log.info("parallax worker stopped", { pid: nextPid, code, signal, runtimeMs })

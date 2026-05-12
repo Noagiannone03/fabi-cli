@@ -67,14 +67,26 @@ export type SwarmBlockingReason =
   | { kind: "need-more-peers"; nodesTotal: number }
   /** bootstrap a échoué : capacité insuffisante. Plus de peers répartiraient les layers. */
   | { kind: "insufficient-capacity"; nodesTotal: number }
-  /** Pipeline alloué côté scheduler, le worker télécharge/charge le modèle. */
+  /**
+   * Pipeline alloué côté scheduler, le worker télécharge/charge le modèle.
+   * Quand notre worker a émis un event `weights_load_*`, on a les compteurs
+   * (filesDone/filesTotal) — vrai progress, pas une approximation.
+   */
   | {
       kind: "loading-model"
       nodesTotal: number
       nodesInitializing: number
       /** Si on connaît l'allocation : nombre de layers à charger pour ce node. */
       layersAssigned?: number
+      /** Progress concret depuis les events worker. */
+      filesDone?: number
+      filesTotal?: number
     }
+  /**
+   * Worker a reçu un timeout d'allocation du scheduler (300s sans layers).
+   * Event `alloc_timeout` du worker — pas une heuristique : le worker LE DIT.
+   */
+  | { kind: "alloc-timeout" }
 
 export interface SwarmStateDetail {
   /** True ssi aucune raison bloquante n'est présente. */
@@ -114,7 +126,30 @@ function deriveReasons(
       // sens : on retourne tôt pour ne pas afficher 4 raisons en cascade.
       return reasons
     }
-    // running → on n'ajoute rien ici, le scheduler dira si on est ready
+    // Signaux directs depuis les events `[FABI] {...}` du worker. Quand on
+    // les a, ils battent toujours les inférences faites depuis le scheduler.
+    if (worker.workerStage === "alloc-timeout") {
+      reasons.push({ kind: "alloc-timeout" })
+      return reasons
+    }
+    if (worker.workerStage === "loading-weights") {
+      // Le worker NOUS a dit qu'il charge des weights — on peut court-
+      // circuiter la vue scheduler et afficher le vrai progress local.
+      const assigned =
+        worker.workerStartLayer !== undefined && worker.workerEndLayer !== undefined
+          ? worker.workerEndLayer - worker.workerStartLayer
+          : undefined
+      reasons.push({
+        kind: "loading-model",
+        nodesTotal: sched.nodes.length || 1,
+        nodesInitializing: 1,
+        layersAssigned: assigned,
+        filesDone: worker.weightsFilesDone,
+        filesTotal: worker.weightsFilesTotal,
+      })
+      return reasons
+    }
+    // running mais pas encore d'events worker → on tombe sur la vue scheduler
   }
 
   // --- Scheduler distant ---
