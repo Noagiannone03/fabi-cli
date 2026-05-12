@@ -15,6 +15,7 @@ import { checkScheduler, type SchedulerInfo } from "./scheduler"
 import { spawnWorker, type WorkerHandle, type WorkerStatus } from "./worker"
 import { tryInstallParallax, type InstallResult } from "./installer"
 import { discoverSwarm, type DiscoverResult, type RegistrySwarm } from "./registry"
+import { patchSwarmActiveState, setSwarmActiveState } from "./state"
 
 const log = Log.create({ service: "swarm.lifecycle" })
 
@@ -176,6 +177,17 @@ export async function startSwarm(
   const effectiveUrl = resolved.schedulerUrl
   const effectivePeer = resolved.schedulerPeer
 
+  // Push l'état initial dans le singleton state — la TUI (SwarmGate) s'en
+  // sert pour piloter le popup non-dismissible tant que pas prêt.
+  setSwarmActiveState({
+    phase: "idle",
+    schedulerUrl: effectiveUrl,
+    schedulerPeer: effectivePeer,
+    swarmId: resolved.registryEntry?.id,
+    swarmModel: resolved.registryEntry?.model,
+    registryEntry: resolved.registryEntry,
+  })
+
   // 1. Healthcheck scheduler — informatif, jamais bloquant
   const scheduler = await checkScheduler(effectiveUrl, SWARM_DEFAULTS.healthcheckTimeoutMs)
   onStatus({ kind: "scheduler", info: scheduler, url: effectiveUrl })
@@ -183,6 +195,7 @@ export async function startSwarm(
   // 2. Worker — REQUIS sauf en mode dev (--no-parallax)
   let worker: WorkerHandle | null = null
   if (runtime.noParallax) {
+    patchSwarmActiveState({ phase: "no-parallax" })
     onStatus({ kind: "worker-disabled" })
   } else {
     const spawn = async (binOverride?: string): Promise<{
@@ -197,6 +210,29 @@ export async function startSwarm(
         onStatus: (s) => {
           lastStatusKind = s.kind
           onStatus({ kind: "worker", status: s })
+          // Propage dans le singleton state pour que la TUI (SwarmGate)
+          // puisse réagir en temps réel.
+          switch (s.kind) {
+            case "starting":
+              patchSwarmActiveState({ phase: "starting", pid: undefined })
+              break
+            case "running":
+              patchSwarmActiveState({ phase: "running", pid: s.pid, lastError: undefined })
+              break
+            case "missing-binary":
+              patchSwarmActiveState({ phase: "missing-binary", lastError: "parallax binary not found" })
+              break
+            case "exited":
+              patchSwarmActiveState({
+                phase: "crashed",
+                pid: undefined,
+                lastError: `exit code ${s.code ?? "?"}${s.signal ? ` (signal ${s.signal})` : ""}`,
+              })
+              break
+            case "error":
+              patchSwarmActiveState({ phase: "crashed", lastError: s.message })
+              break
+          }
         },
       })
       return { worker: w, lastStatusKind }
@@ -238,6 +274,7 @@ export async function startSwarm(
       stopped = true
       if (worker) await worker.stop()
       if (active === handle) active = null
+      patchSwarmActiveState({ phase: "stopped", pid: undefined })
     },
   }
 

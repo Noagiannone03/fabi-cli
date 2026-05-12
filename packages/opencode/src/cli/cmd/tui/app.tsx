@@ -27,6 +27,7 @@ import { EditorContextProvider } from "@tui/context/editor"
 import { useEvent } from "@tui/context/event"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { StartupLoading } from "@tui/component/startup-loading"
+import { SwarmGate } from "@tui/component/swarm-gate"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { SyncProviderV2 } from "@tui/context/sync-v2"
 import { LocalProvider, useLocal } from "@tui/context/local"
@@ -909,6 +910,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       {plugin()}
       <TuiPluginRuntime.Slot name="app" />
       <StartupLoading ready={ready} />
+      <SwarmGate />
     </box>
   )
 }
