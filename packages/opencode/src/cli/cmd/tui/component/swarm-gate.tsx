@@ -2,16 +2,19 @@
 //
 // Pourquoi un overlay custom plutôt qu'un Dialog standard :
 //   - Le Dialog stack du TUI est dismissible (ESC / Ctrl+C → clear). On ne
-//     veut PAS que l'utilisateur puisse fermer ce popup à la main : tant
-//     que le worker n'a pas fini de charger ses layers, envoyer un chat
-//     finit en 503 (cf. logs scheduler "POST /v1/chat/completions 503").
+//     veut PAS que l'utilisateur puisse fermer ce popup à la main : tant que
+//     le swarm n'est pas prêt, envoyer un chat finit en 503.
 //   - Le zIndex 4000 le pose au-dessus du Dialog stack (3000) ET du prompt
 //     input : impossible de cliquer dessous ou de taper dans le prompt
 //     pendant que ce gate est visible.
 //
+// **Exception "need-more-peers" :** si la SEULE raison bloquante est qu'il
+// faut plus de peers, on n'affiche PAS de popup. Le prompt input remplace
+// son textarea par un message inline ("Waiting for more peers…"). C'est
+// moins agressif visuellement, plus adapté à un état qui peut durer (on
+// attend que des amis rejoignent le swarm).
+//
 // Le gate se ferme TOUT SEUL dès que `useSwarmState().ready` passe à true.
-// Aucune action utilisateur n'est nécessaire (et possible). C'est une
-// "feature" plutôt qu'un "alert" — on protège l'UX, pas on informe.
 
 import { For, Show, createMemo } from "solid-js"
 import { RGBA, TextAttributes } from "@opentui/core"
@@ -19,73 +22,63 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "@tui/context/theme"
 import { Spinner } from "./spinner"
 import { useSwarmState, type SwarmBlockingReason } from "./use-swarm-state"
+import { useAnimatedDots, useCyclingWord } from "./cycling-text"
 
 /**
- * Décrit une raison bloquante en une ligne lisible. Pas de jargon Parallax
- * ici : "loading model", "waiting for peers", … L'objectif c'est que
- * l'utilisateur comprenne ce qui se passe.
+ * Mots de chargement qui cyclent toutes les ~2.5s sous le headline.
+ * Ordre choisi pour suggérer une progression (download → load → init →
+ * boot) sans jamais mentir : ces 4 verbes décrivent réellement ce qui se
+ * passe au worker pendant la phase de refit.
  */
-function describeReason(r: SwarmBlockingReason): string {
-  switch (r.kind) {
-    case "worker-not-started":
-      if (r.phase === "starting") return "Starting your local worker…"
-      if (r.phase === "stopped") return "Local worker is stopped — restarting…"
-      return "Preparing your local worker…"
-    case "worker-crashed":
-      return r.lastError
-        ? `Local worker crashed: ${r.lastError} (auto-restart in 30s)`
-        : "Local worker crashed (auto-restart in 30s)"
-    case "worker-missing-binary":
-      return "Parallax binary not installed on this machine."
-    case "scheduler-unreachable":
-      return "Cannot reach swarm scheduler — checking your connection…"
-    case "need-more-peers":
-      return `Waiting for more peers (only ${r.nodesTotal} connected, pipeline incomplete)…`
-    case "loading-model":
-      return `Downloading and loading model on ${r.nodesWaiting}/${r.nodesTotal} peer${r.nodesTotal > 1 ? "s" : ""}…`
-    case "pipeline-not-ready":
-      return `Pipeline not ready (cluster status: ${r.clusterStatus})…`
-  }
+const LOADING_WORDS = [
+  "Downloading model",
+  "Loading layers",
+  "Initializing pipeline",
+  "Booting swarm",
+] as const
+
+/**
+ * Décide si le gate doit s'afficher en plein écran (popup). On masque le
+ * popup quand la seule raison est "need-more-peers" — dans ce cas l'input
+ * affiche un message inline et le gate est inutile.
+ */
+function shouldShowPopup(reasons: SwarmBlockingReason[]): boolean {
+  if (reasons.length === 0) return false
+  // Toutes les raisons sont "need-more-peers" → cas géré inline, pas de popup.
+  return !reasons.every((r) => r.kind === "need-more-peers")
 }
 
 /**
- * Headline conditionnel selon la raison principale. On veut que l'utilisateur
- * sache immédiatement où en est le boot.
+ * Headline court selon la raison principale. Le headline est COURT (1-3
+ * mots), le détail vient juste en dessous via les mots qui cyclent.
  */
 function pickHeadline(reasons: SwarmBlockingReason[]): string {
-  if (reasons.length === 0) return "Swarm ready"
-  // Priorité : missing-binary > worker-crashed > worker-not-started >
-  // scheduler-unreachable > need-more-peers > loading-model > pipeline-not-ready
-  const priority: SwarmBlockingReason["kind"][] = [
-    "worker-missing-binary",
-    "worker-crashed",
-    "worker-not-started",
-    "scheduler-unreachable",
-    "need-more-peers",
-    "loading-model",
-    "pipeline-not-ready",
-  ]
-  for (const kind of priority) {
-    if (reasons.some((r) => r.kind === kind)) {
-      switch (kind) {
-        case "worker-missing-binary":
-          return "Parallax not installed"
-        case "worker-crashed":
-          return "Worker restarting"
-        case "worker-not-started":
-          return "Starting up"
-        case "scheduler-unreachable":
-          return "Connecting to swarm"
-        case "need-more-peers":
-          return "Waiting for peers"
-        case "loading-model":
-          return "Loading model"
-        case "pipeline-not-ready":
-          return "Pipeline initializing"
-      }
-    }
+  if (reasons.length === 0) return "Ready"
+
+  // Priorité : missing-binary > crashed > scheduler-unreachable > worker-not-started
+  if (reasons.some((r) => r.kind === "worker-missing-binary")) return "Parallax not installed"
+  if (reasons.some((r) => r.kind === "worker-crashed")) return "Restarting worker"
+  if (reasons.some((r) => r.kind === "scheduler-unreachable")) return "Connecting"
+  if (reasons.some((r) => r.kind === "worker-not-started")) return "Starting"
+
+  // Cas nominal : on charge / on initialise.
+  return "Setting up your model"
+}
+
+/**
+ * Pour un état critique (binaire manquant, worker crash), on affiche le
+ * détail au lieu des mots qui cyclent — l'utilisateur a besoin de l'info
+ * précise (ex: "auto-restart in 30s"), pas d'animation rassurante.
+ */
+function pickCriticalDetail(reasons: SwarmBlockingReason[]): string | null {
+  const crashed = reasons.find((r) => r.kind === "worker-crashed")
+  if (crashed && crashed.kind === "worker-crashed") {
+    return crashed.lastError ?? "worker crashed, auto-restart in 30s"
   }
-  return "Swarm initializing"
+  if (reasons.some((r) => r.kind === "worker-missing-binary")) {
+    return "Run the install script to add Parallax to this machine."
+  }
+  return null
 }
 
 export function SwarmGate() {
@@ -93,10 +86,14 @@ export function SwarmGate() {
   const dimensions = useTerminalDimensions()
   const state = useSwarmState()
 
+  const visible = createMemo(() => shouldShowPopup(state().reasons))
   const headline = createMemo(() => pickHeadline(state().reasons))
+  const criticalDetail = createMemo(() => pickCriticalDetail(state().reasons))
+  const cyclingWord = useCyclingWord(LOADING_WORDS)
+  const dots = useAnimatedDots()
 
   return (
-    <Show when={!state().ready}>
+    <Show when={visible()}>
       <box
         width={dimensions().width}
         height={dimensions().height}
@@ -109,7 +106,7 @@ export function SwarmGate() {
         backgroundColor={RGBA.fromInts(0, 0, 0, 180)}
       >
         <box
-          width={Math.min(76, dimensions().width - 4)}
+          width={Math.min(64, dimensions().width - 4)}
           backgroundColor={theme.backgroundPanel}
           border
           borderColor={theme.primary}
@@ -131,7 +128,7 @@ export function SwarmGate() {
           paddingLeft={3}
           paddingRight={3}
         >
-          {/* Header — marqueur brand + headline + spinner */}
+          {/* Headline + spinner */}
           <box flexDirection="row" gap={1} alignItems="center">
             <text fg={theme.primary} attributes={TextAttributes.BOLD}>
               ▍
@@ -142,7 +139,21 @@ export function SwarmGate() {
             <Spinner color={theme.primary} />
           </box>
 
-          {/* Métadonnées : modèle + peers */}
+          {/* Détail critique OU mot qui cycle */}
+          <text> </text>
+          <Show
+            when={criticalDetail()}
+            fallback={
+              <text fg={theme.textMuted}>
+                {cyclingWord()}
+                {dots()}
+              </text>
+            }
+          >
+            <text fg={theme.error}>{criticalDetail()}</text>
+          </Show>
+
+          {/* Métadonnées discrètes : modèle + peers */}
           <Show when={state().model || state().nodesTotal > 0}>
             <text> </text>
             <Show when={state().model}>
@@ -151,35 +162,18 @@ export function SwarmGate() {
                 <text fg={theme.text}>{state().model}</text>
               </box>
             </Show>
-            <box flexDirection="row" gap={1}>
-              <text fg={theme.textMuted}>Peers</text>
-              <text fg={theme.text}>
-                {state().nodesAvailable}/{state().nodesTotal} ready
-              </text>
-              <Show when={state().nodesWaiting > 0}>
-                <text fg={theme.textMuted}>
-                  ({state().nodesWaiting} still loading)
-                </text>
-              </Show>
-            </box>
-          </Show>
-
-          {/* Liste des raisons bloquantes */}
-          <text> </text>
-          <For each={state().reasons}>
-            {(r) => (
+            <Show when={state().nodesTotal > 0}>
               <box flexDirection="row" gap={1}>
-                <text fg={theme.primary}>─</text>
-                <text fg={theme.text}>{describeReason(r)}</text>
+                <text fg={theme.textMuted}>Peers</text>
+                <text fg={theme.text}>
+                  {state().nodesAvailable}/{state().nodesTotal}
+                </text>
+                <Show when={state().nodesWaiting > 0}>
+                  <text fg={theme.textMuted}>({state().nodesWaiting} loading)</text>
+                </Show>
               </box>
-            )}
-          </For>
-
-          {/* Footer instructionnel */}
-          <text> </text>
-          <text fg={theme.textMuted}>
-            This dialog closes automatically when the swarm is ready to chat.
-          </text>
+            </Show>
+          </Show>
         </box>
       </box>
     </Show>

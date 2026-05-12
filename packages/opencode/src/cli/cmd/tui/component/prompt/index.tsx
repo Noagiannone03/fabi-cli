@@ -1,4 +1,4 @@
-import { BoxRenderable, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
+import { BoxRenderable, RGBA, TextAttributes, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
 import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
 import "opentui-spinner/solid"
 import path from "path"
@@ -45,6 +45,8 @@ import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "@tui/context/args"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { WorkspaceLabel, type WorkspaceStatus } from "../workspace-label"
+import { useSwarmState } from "../use-swarm-state"
+import { ChatLoadingIndicator } from "../chat-loading-indicator"
 
 export type PromptProps = {
   sessionID?: string
@@ -1170,6 +1172,23 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  // État du swarm — on l'utilise pour deux comportements :
+  //   1. swarmWaitingForPeers : si la seule raison bloquante est qu'on a
+  //      besoin de plus de peers, on remplace l'input par un message
+  //      d'attente inline (cf box conditionnel plus bas).
+  //   2. chatLoadingVisible : on affiche l'indicateur "Generating…" au
+  //      dessus de l'input dès qu'une réponse assistant est en cours.
+  const swarmState = useSwarmState()
+  const swarmWaitingForPeers = createMemo(() => {
+    const reasons = swarmState().reasons
+    if (reasons.length === 0) return false
+    return reasons.every((r) => r.kind === "need-more-peers")
+  })
+  const chatLoadingVisible = createMemo(() => {
+    const t = status().type
+    return t !== "idle" && t !== "retry"
+  })
+
   return (
     <>
       <Autocomplete
@@ -1196,6 +1215,26 @@ export function Prompt(props: PromptProps) {
         promptPartTypeId={() => promptPartTypeId}
       />
       <box ref={(r) => (anchor = r)} visible={props.visible !== false}>
+        {/*
+         * Indicateur "le modèle travaille" — affiché AU-DESSUS de la barre
+         * d'input pendant la génération. Remplace l'ancien spinner inline
+         * en bas (devenu redondant et planqué).
+         */}
+        <Show when={chatLoadingVisible()}>
+          <ChatLoadingIndicator color={spinnerDef().color} />
+        </Show>
+
+        {/*
+         * Mode "en attente d'autres peers" — le worker a chargé son modèle
+         * mais le swarm n'a pas encore assez de peers pour former un
+         * pipeline complet. On masque l'input (impossible de chatter) et
+         * on affiche un message d'attente à la place. Dès qu'un peer
+         * rejoint et que le pipeline est complet, swarmWaitingForPeers
+         * repasse à false → l'input revient automatiquement.
+         */}
+        <Show
+          when={swarmWaitingForPeers()}
+          fallback={
         <box
           border
           borderColor={borderHighlight()}
@@ -1472,6 +1511,59 @@ export function Prompt(props: PromptProps) {
             </box>
           </box>
         </box>
+          }
+        >
+          {/*
+           * Branche WAITING-FOR-PEERS : aucun input possible tant qu'il
+           * manque des peers pour former un pipeline complet. On garde la
+           * même forme visuelle (bordure rounded) que l'input pour ne pas
+           * désorganiser la mise en page, mais on remplace la textarea par
+           * un message centré + petits points animés pour montrer qu'on
+           * surveille en continu.
+           */}
+          <box
+            border
+            borderColor={theme.textMuted}
+            customBorderChars={{
+              topLeft: "╭",
+              topRight: "╮",
+              bottomLeft: "╰",
+              bottomRight: "╯",
+              horizontal: "─",
+              vertical: "│",
+              bottomT: "─",
+              topT: "─",
+              cross: "┼",
+              leftT: "│",
+              rightT: "│",
+            }}
+            backgroundColor={theme.backgroundPanel}
+            paddingLeft={3}
+            paddingRight={3}
+            paddingTop={1}
+            paddingBottom={1}
+          >
+            <box flexDirection="row" gap={1}>
+              <text fg={theme.primary} attributes={TextAttributes.BOLD}>▍</text>
+              <text fg={theme.text} attributes={TextAttributes.BOLD}>
+                Waiting for more peers in the swarm
+              </text>
+              <Spinner color={theme.primary} />
+            </box>
+            <text> </text>
+            <text fg={theme.textMuted}>
+              The pipeline needs more contributors before inference can run.
+              You can chat as soon as enough peers join.
+            </text>
+            <Show when={swarmState().nodesTotal > 0}>
+              <text> </text>
+              <text fg={theme.textMuted}>
+                Currently connected: {swarmState().nodesTotal} peer
+                {swarmState().nodesTotal === 1 ? "" : "s"}
+              </text>
+            </Show>
+          </box>
+        </Show>
         <box height={1} flexShrink={0} />
         <box width="100%" flexDirection="row" justifyContent="space-between">
           <Switch>
@@ -1483,11 +1575,19 @@ export function Prompt(props: PromptProps) {
                 justifyContent={status().type === "retry" ? "space-between" : "flex-start"}
               >
                 <box flexShrink={0} flexDirection="row" gap={1}>
-                  <box marginLeft={1}>
-                    <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
-                      <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={70} />
-                    </Show>
-                  </box>
+                  {/*
+                   * Spinner inline réservé au cas `retry` (où il accompagne
+                   * le message d'erreur). En génération nominale l'indicateur
+                   * "Generating…" au-dessus de l'input fait ce travail —
+                   * inutile de dupliquer en dessous.
+                   */}
+                  <Show when={status().type === "retry"}>
+                    <box marginLeft={1}>
+                      <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
+                        <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={70} />
+                      </Show>
+                    </box>
+                  </Show>
                   <box flexDirection="row" gap={1} flexShrink={0}>
                     {(() => {
                       const retry = createMemo(() => {
