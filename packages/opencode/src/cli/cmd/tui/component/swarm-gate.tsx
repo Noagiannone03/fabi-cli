@@ -22,7 +22,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "@tui/context/theme"
 import { Spinner } from "./spinner"
 import { useSwarmState, type SwarmBlockingReason } from "./use-swarm-state"
-import { useAnimatedDots, useCyclingWord } from "./cycling-text"
+import { formatElapsed, useAnimatedDots, useCyclingWord, useElapsedSeconds } from "./cycling-text"
 
 /**
  * Mots de chargement qui cyclent toutes les ~2.5s sous le headline.
@@ -92,6 +92,20 @@ export function SwarmGate() {
   const cyclingWord = useCyclingWord(LOADING_WORDS)
   const dots = useAnimatedDots()
 
+  // Timer écoulé depuis l'apparition du gate. Reset automatique quand
+  // visible() repasse à false. Sert à :
+  //   - rassurer (l'user voit que le temps passe normalement)
+  //   - détecter visuellement quand quelque chose traîne plus que prévu
+  const elapsed = useElapsedSeconds(visible)
+  // Seuils choisis empiriquement :
+  //   180s (3 min) : on rappelle gentiment que le 1er download prend du
+  //     temps. Sur une fibre c'est fini en <2min ; sur du 4G ou un wifi
+  //     saturé ça peut dépasser 3min sans rien d'anormal.
+  //   480s (8 min) : à ce stade c'est suspect — un download moyen est
+  //     terminé. On bascule en avertissement rouge.
+  const showFirstTimeHint = createMemo(() => elapsed() >= 180 && elapsed() < 480)
+  const showStuckWarning = createMemo(() => elapsed() >= 480)
+
   return (
     <Show when={visible()}>
       <box
@@ -153,8 +167,8 @@ export function SwarmGate() {
             <text fg={theme.error}>{criticalDetail()}</text>
           </Show>
 
-          {/* Métadonnées discrètes : modèle + peers */}
-          <Show when={state().model || state().nodesTotal > 0}>
+          {/* Métadonnées discrètes : modèle + peers + temps écoulé */}
+          <Show when={state().model || state().nodesTotal > 0 || elapsed() > 0}>
             <text> </text>
             <Show when={state().model}>
               <box flexDirection="row" gap={1}>
@@ -173,6 +187,28 @@ export function SwarmGate() {
                 </Show>
               </box>
             </Show>
+            <Show when={elapsed() > 0}>
+              <box flexDirection="row" gap={1}>
+                <text fg={theme.textMuted}>Elapsed</text>
+                <text fg={theme.text}>{formatElapsed(elapsed())}</text>
+              </box>
+            </Show>
+          </Show>
+
+          {/* Hints progressifs selon la durée du chargement */}
+          <Show when={showFirstTimeHint()}>
+            <text> </text>
+            <text fg={theme.textMuted}>
+              First-time downloads can take a few minutes on slow connections.
+            </text>
+          </Show>
+          <Show when={showStuckWarning()}>
+            <text> </text>
+            <text fg={theme.error}>
+              This is taking longer than expected. Check your network and that
+              your computer hasn't gone to sleep. If it stays stuck, restart
+              fabi.
+            </text>
           </Show>
         </box>
       </box>

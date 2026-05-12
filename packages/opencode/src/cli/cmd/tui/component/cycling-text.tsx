@@ -57,3 +57,62 @@ export function useAnimatedDots(intervalMs: number = 450, maxDots: number = 3): 
 
   return () => ".".repeat(n())
 }
+
+/**
+ * Renvoie un getter qui compte les secondes écoulées depuis que `active()`
+ * est passé à `true`. Reset automatique quand `active()` repasse à `false`.
+ *
+ * Usage typique : afficher le temps que dure un état de chargement, et
+ * reset le compteur dès qu'on en sort (pour ne pas afficher "5m" si l'user
+ * a juste eu un re-trigger après une période de succès).
+ */
+export function useElapsedSeconds(active: () => boolean): () => number {
+  const [seconds, setSeconds] = createSignal(0)
+  let startedAt: number | null = null
+  let timer: ReturnType<typeof setInterval> | null = null
+
+  const stop = () => {
+    if (timer) {
+      clearInterval(timer)
+      timer = null
+    }
+    startedAt = null
+    setSeconds(0)
+  }
+
+  // createEffect ferait l'affaire mais on évite l'import pour rester
+  // self-contained. On utilise un check manuel à chaque tick d'animation.
+  // En pratique le composant qui appelle ce hook se re-render au change-
+  // ment de `active()`, donc cette astuce suffit.
+  onMount(() => {
+    const tick = () => {
+      const on = active()
+      if (on && startedAt === null) {
+        startedAt = Date.now()
+        setSeconds(0)
+      } else if (on && startedAt !== null) {
+        setSeconds(Math.floor((Date.now() - startedAt) / 1000))
+      } else if (!on && startedAt !== null) {
+        stop()
+      }
+    }
+    timer = setInterval(tick, 500) // 500ms : compromis fluidité / CPU
+    tick() // tick immédiat pour ne pas attendre 500ms au premier rendu
+  })
+
+  onCleanup(stop)
+
+  return seconds
+}
+
+/**
+ * Format "Xm Ys" ou "Ys" selon la durée. Pas d'heure : on n'attend pas
+ * qu'un chargement dure plus d'1h, et au-delà l'UX devra de toute façon
+ * proposer de relancer.
+ */
+export function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return `${m}m ${s}s`
+}
