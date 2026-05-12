@@ -9,7 +9,7 @@
 //
 // Le SwarmGate consomme ce hook et reste affiché tant que `ready = false`.
 
-import { createMemo, createSignal, onCleanup } from "solid-js"
+import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import {
   getSwarmActiveState,
   subscribeSwarmActiveState,
@@ -83,10 +83,20 @@ export interface SwarmStateDetail {
   swarmId?: string
 }
 
+/**
+ * Avant de conclure "need-more-peers", on laisse le scheduler 20s pour tenter
+ * l'allocation. Si le seul peer présent a assez de VRAM pour tous les layers,
+ * le scheduler passera `status` à "available" pendant cette fenêtre.
+ * 20s = 5 cycles de poll (4s chacun) : suffisant pour que le scheduler finisse
+ * un round d'allocation, même si la connexion Lattica est lente.
+ */
+const ALLOCATION_GRACE_MS = 20_000
+
 function deriveReasons(
   worker: SwarmActiveState,
   sched: SchedulerStatusDetail,
   schedLoading: boolean,
+  nodesFirstSeenMs: number | null,
 ): SwarmBlockingReason[] {
   const reasons: SwarmBlockingReason[] = []
 
@@ -140,11 +150,21 @@ function deriveReasons(
     // est vraiment vide. Dans les deux cas → "connecting".
     reasons.push({ kind: "connecting-to-swarm" })
   } else {
-    // Des peers sont là mais l'allocation a échoué à produire un
-    // pipeline complet (capacité insuffisante par rapport au nombre de
-    // layers du modèle). Cas typique : tu rejoins seul un swarm avec un
-    // modèle plus gros que ce que ton GPU peut porter.
-    reasons.push({ kind: "need-more-peers", nodesTotal })
+    // Des peers sont là mais pas de pipeline formé. Deux sous-cas :
+    //   a) Le scheduler est en train de tenter l'allocation (juste apparu)
+    //   b) Il a déjà essayé et la capacité est insuffisante (besoin de peers)
+    //
+    // On ne peut pas distinguer (a) de (b) directement via l'API Parallax.
+    // On applique donc une grace period : si les nodes viennent d'apparaître
+    // (il y a moins de ALLOCATION_GRACE_MS), on reste en "connecting" pour
+    // laisser le scheduler conclure son round d'allocation. Après la grace
+    // period, on conclut qu'il faut plus de peers.
+    const ageMs = nodesFirstSeenMs !== null ? Date.now() - nodesFirstSeenMs : ALLOCATION_GRACE_MS
+    if (ageMs < ALLOCATION_GRACE_MS) {
+      reasons.push({ kind: "connecting-to-swarm" })
+    } else {
+      reasons.push({ kind: "need-more-peers", nodesTotal })
+    }
   }
 
   return reasons
@@ -156,10 +176,20 @@ export function useSwarmState(): () => SwarmStateDetail {
   const unsub = subscribeSwarmActiveState(setWorker)
   onCleanup(unsub)
 
+  // Timestamp (ms) du premier poll où des nodes étaient visibles. Sert à la
+  // grace period "connecting-to-swarm" avant de conclure "need-more-peers".
+  // Remis à null si les nodes disparaissent (scheduler restart, etc.).
+  const [nodesFirstSeenMs, setNodesFirstSeenMs] = createSignal<number | null>(null)
+  createEffect(() => {
+    const hasNodes = sched.status().nodes.length > 0
+    if (hasNodes && nodesFirstSeenMs() === null) setNodesFirstSeenMs(Date.now())
+    else if (!hasNodes && nodesFirstSeenMs() !== null) setNodesFirstSeenMs(null)
+  })
+
   return createMemo<SwarmStateDetail>(() => {
     const w = worker()
     const s = sched.status()
-    const reasons = deriveReasons(w, s, sched.loading())
+    const reasons = deriveReasons(w, s, sched.loading(), nodesFirstSeenMs())
 
     return {
       ready: reasons.length === 0,

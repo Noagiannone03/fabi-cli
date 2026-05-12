@@ -122,22 +122,34 @@ let signalsAttached = false
 /**
  * Attache les handlers de signaux pour cleanup le worker.
  *
- * Idempotent : ne s'attache qu'une fois par process. On ne `process.exit()`
- * pas nous-mêmes — on se contente de kill le worker, le code appelant gère
- * la sortie (la TUI a son propre handler signal qui exit le main process).
+ * Idempotent : ne s'attache qu'une fois par process.
+ *
+ * SIGINT (Ctrl+C) est intentionnellement omis : si on installe un listener
+ * SIGINT, Node.js n'exit plus par défaut et le CLI reste suspendu. On laisse
+ * donc SIGINT au comportement par défaut de Node.js (exit) → process.on("exit")
+ * → shutdownActiveSync() fait le ménage en synchrone.
+ * Sur la TUI, Ctrl+C passe en plus par le keybind "app_exit" → exit() →
+ * onExit() → shutdownSwarmActive() qui fait le shutdown gracieux.
+ *
+ * SIGHUP : déjà géré par exit.tsx (process.on("SIGHUP", () => exit())).
+ *
+ * SIGTERM : vient de l'extérieur (kill, systemd). On shutdown le worker puis
+ * on relance le signal pour que Node.js exit normalement (code 143).
  */
 function attachSignalHandlers(): void {
   if (signalsAttached) return
   signalsAttached = true
 
-  const onSignal = (sig: NodeJS.Signals) => {
-    log.info("received signal, shutting swarm worker", { signal: sig })
-    // fire-and-forget : la TUI/CLI va exit séparément
-    void shutdownActive()
-  }
-  process.on("SIGINT", () => onSignal("SIGINT"))
-  process.on("SIGTERM", () => onSignal("SIGTERM"))
-  process.on("SIGHUP", () => onSignal("SIGHUP"))
+  process.on("SIGTERM", () => {
+    log.info("received SIGTERM, shutting swarm worker")
+    void (async () => {
+      await shutdownActive()
+      // Relance le signal avec le handler par défaut pour que le process
+      // exit avec le bon code (143) et que le parent sache qu'on a bien reçu SIGTERM.
+      process.removeAllListeners("SIGTERM")
+      process.kill(process.pid, "SIGTERM")
+    })()
+  })
 }
 
 /**
