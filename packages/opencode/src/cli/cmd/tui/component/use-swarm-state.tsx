@@ -84,13 +84,20 @@ export interface SwarmStateDetail {
 }
 
 /**
- * Avant de conclure "need-more-peers", on laisse le scheduler 20s pour tenter
- * l'allocation. Si le seul peer présent a assez de VRAM pour tous les layers,
- * le scheduler passera `status` à "available" pendant cette fenêtre.
- * 20s = 5 cycles de poll (4s chacun) : suffisant pour que le scheduler finisse
- * un round d'allocation, même si la connexion Lattica est lente.
+ * Grace period UNIQUEMENT quand `nodes.length >= init_nodes_num` ET
+ * `status="waiting"`. Couvre la staleness du poll (4s) + le temps que le
+ * scheduler Parallax termine son round de bootstrap (`Scheduler.bootstrap()`
+ * est appelé SYNCHRONIQUEMENT dans `_process_joins` dès qu'un node atteint le
+ * seuil — ça prend ~100ms côté scheduler, mais notre poll peut tomber juste
+ * avant). 8s = 2 cycles de poll, suffisant pour observer le résultat même au
+ * pire timing. Après ça : si `status` est encore "waiting", l'allocation a
+ * échoué pour de bon (capacité GPU insuffisante) et plus de peers aideraient.
+ *
+ * À l'inverse, si `nodes.length < init_nodes_num`, on est SOUS le seuil
+ * opérateur — le scheduler ne tentera même PAS de bootstrap. Aucune raison
+ * d'attendre : on affiche "need-more-peers" tout de suite.
  */
-const ALLOCATION_GRACE_MS = 20_000
+const BOOTSTRAP_GRACE_MS = 8_000
 
 function deriveReasons(
   worker: SwarmActiveState,
@@ -149,22 +156,36 @@ function deriveReasons(
     // n'a pas fini son handshake Lattica/P2P (cas usuel), soit le swarm
     // est vraiment vide. Dans les deux cas → "connecting".
     reasons.push({ kind: "connecting-to-swarm" })
+    return reasons
+  }
+
+  // À partir d'ici : nodesTotal > 0 et status="waiting". Décide entre
+  // "need-more-peers" et "connecting" SUR DES SIGNAUX RÉELS du scheduler.
+  const initNodes = sched.initNodesNum ?? 1
+
+  if (nodesTotal < initNodes) {
+    // Sous le seuil opérateur (`min_nodes_bootstrapping`) : le scheduler ne
+    // tentera PAS de bootstrap tant qu'on n'a pas atteint initNodes. Pas
+    // d'ambiguïté possible → besoin de plus de peers, immédiat.
+    reasons.push({ kind: "need-more-peers", nodesTotal })
+    return reasons
+  }
+
+  // nodesTotal >= initNodes et status="waiting". Deux cas indistinguables
+  // depuis l'API à un instant T :
+  //   a) bootstrap() en cours / juste terminé mais notre poll est stale (4s)
+  //   b) bootstrap() a échoué (capacité GPU/RAM insuffisante)
+  //
+  // Côté Parallax, bootstrap() est appelé synchroniquement dans
+  // _process_joins() dès qu'un node franchit le seuil — donc (a) se résout
+  // en ~100ms côté scheduler. On laisse 8s pour absorber 2 cycles de poll
+  // (worst-case), après quoi on conclut que c'est (b) : un peer de plus
+  // permettrait de répartir les layers et de former un pipeline.
+  const ageMs = nodesFirstSeenMs !== null ? Date.now() - nodesFirstSeenMs : BOOTSTRAP_GRACE_MS
+  if (ageMs < BOOTSTRAP_GRACE_MS) {
+    reasons.push({ kind: "connecting-to-swarm" })
   } else {
-    // Des peers sont là mais pas de pipeline formé. Deux sous-cas :
-    //   a) Le scheduler est en train de tenter l'allocation (juste apparu)
-    //   b) Il a déjà essayé et la capacité est insuffisante (besoin de peers)
-    //
-    // On ne peut pas distinguer (a) de (b) directement via l'API Parallax.
-    // On applique donc une grace period : si les nodes viennent d'apparaître
-    // (il y a moins de ALLOCATION_GRACE_MS), on reste en "connecting" pour
-    // laisser le scheduler conclure son round d'allocation. Après la grace
-    // period, on conclut qu'il faut plus de peers.
-    const ageMs = nodesFirstSeenMs !== null ? Date.now() - nodesFirstSeenMs : ALLOCATION_GRACE_MS
-    if (ageMs < ALLOCATION_GRACE_MS) {
-      reasons.push({ kind: "connecting-to-swarm" })
-    } else {
-      reasons.push({ kind: "need-more-peers", nodesTotal })
-    }
+    reasons.push({ kind: "need-more-peers", nodesTotal })
   }
 
   return reasons

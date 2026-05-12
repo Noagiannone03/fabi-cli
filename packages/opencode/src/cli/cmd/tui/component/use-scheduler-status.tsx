@@ -37,6 +37,13 @@ export interface SchedulerStatusDetail {
   model?: string
   /** Liste complète des nodes (peers) connectés. */
   nodes: SchedulerNode[]
+  /**
+   * Seuil de bootstrap configuré par l'opérateur (`min_nodes_bootstrapping`
+   * côté Parallax). Le scheduler tente une allocation dès que
+   * `nodes.length >= initNodesNum`. Tant qu'on est en-dessous, c'est un
+   * "besoin de plus de peers" SOLIDE (pas une question de timing).
+   */
+  initNodesNum?: number
   /** Si true, le swarm a besoin de plus de peers pour former un pipeline. */
   needMoreNodes?: boolean
   /** Nombre de requêtes simultanées que le pipeline peut traiter (0 = pas prêt). */
@@ -84,6 +91,7 @@ async function tick(): Promise<void> {
           status?: string
           model_name?: string
           node_list?: SchedulerNode[]
+          init_nodes_num?: number
           need_more_nodes?: boolean
           max_running_request?: number
         }
@@ -94,6 +102,7 @@ async function tick(): Promise<void> {
         status: data.status,
         model: data.model_name,
         nodes: Array.isArray(data.node_list) ? data.node_list : [],
+        initNodesNum: typeof data.init_nodes_num === "number" ? data.init_nodes_num : undefined,
         needMoreNodes: Boolean(data.need_more_nodes),
         maxRunningRequest: data.max_running_request,
       })
