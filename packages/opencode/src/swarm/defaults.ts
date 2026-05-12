@@ -28,8 +28,17 @@ export const SWARM_DEFAULTS = {
   /** Timeout du healthcheck scheduler au boot, en ms. */
   healthcheckTimeoutMs: 3000,
 
-  /** Délai SIGTERM → SIGKILL lors du shutdown du worker, en ms. */
-  workerShutdownGraceMs: 5000,
+  /**
+   * Délai SIGTERM → SIGKILL lors du shutdown du worker, en ms.
+   *
+   * 1500ms : compromis interactif vs propreté. Sur Ctrl+C dans la TUI on veut
+   * que le terminal revienne vite (<2s). 1.5s laisse à Parallax assez de temps
+   * pour catcher le SIGTERM et notifier le scheduler de son départ (sinon le
+   * peer reste flagé `waiting` côté scheduler pendant le heartbeat timeout
+   * configuré, 25s par défaut). Au-delà → SIGKILL inconditionnel, on ne
+   * laisse pas de zombie GPU en arrière-plan.
+   */
+  workerShutdownGraceMs: 1500,
 
   /** Timeout total des requêtes inférence (10 min — l'inférence distribuée est lente). */
   inferenceTimeoutMs: 600_000,

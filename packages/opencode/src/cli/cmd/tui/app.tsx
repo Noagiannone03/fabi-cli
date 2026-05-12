@@ -28,6 +28,7 @@ import { useEvent } from "@tui/context/event"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { StartupLoading } from "@tui/component/startup-loading"
 import { SwarmGate } from "@tui/component/swarm-gate"
+import { shutdownActive as shutdownSwarmActive } from "@/swarm/lifecycle"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { SyncProviderV2 } from "@tui/context/sync-v2"
 import { LocalProvider, useLocal } from "@tui/context/local"
@@ -127,6 +128,19 @@ export function tui(input: {
 
     const onExit = async () => {
       unguard?.()
+      // Cleanup gracieux du worker Parallax AVANT que thread.ts/attach.ts
+      // appellent process.exit(0) — sinon le worker survit en orphelin
+      // (spawn detached + unref). Cap à 2s pour ne pas faire patienter
+      // l'utilisateur indéfiniment ; au-delà le filet `process.on('exit')`
+      // → killSync (SIGKILL) prendra le relais.
+      try {
+        await Promise.race([
+          shutdownSwarmActive(),
+          new Promise<void>((r) => setTimeout(r, 2000)),
+        ])
+      } catch {
+        // Pas grave : le SIGKILL synchrone garantira que rien ne survit.
+      }
       resolve()
     }
 

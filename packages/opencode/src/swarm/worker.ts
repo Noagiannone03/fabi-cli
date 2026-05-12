@@ -429,9 +429,22 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     })
   }
 
-  // Best-effort sync kill (utilisé depuis process.on("exit") qui ne peut pas
-  // await). On envoie juste SIGTERM, sans timer ni SIGKILL — l'OS finira si
-  // Parallax ne réagit pas, et de toute façon le worker est detached/unref'd.
+  // Filet de sécurité synchrone (utilisé depuis process.on("exit") qui ne peut
+  // pas await). On envoie SIGKILL — pas SIGTERM — pour garantir que rien ne
+  // survit : SIGKILL ne peut pas être catché ni ignoré, contrairement à
+  // SIGTERM que Parallax/MLX/vLLM peuvent retarder (ex: au milieu d'une
+  // allocation Metal). Le worker est spawné avec detached:true + unref donc
+  // sans SIGKILL forcé, il devient orphelin et continue à pomper le GPU.
+  //
+  // La perte du shutdown gracieux Parallax (pas de "leaving" envoyé au
+  // scheduler) est compensée par le heartbeat timeout côté scheduler
+  // (PARALLAX_HEARTBEAT_TIMEOUT, 25s par défaut) : le peer disparaît tout
+  // seul de la liste après ce délai. Pas l'idéal, mais acceptable.
+  //
+  // Le chemin nominal (async, gracieux) passe par `stop()` ci-dessus qui
+  // tente SIGTERM puis SIGKILL avec un grace period configurable. killSync
+  // n'est appelé que si le chemin async n'a pas été pris (process.exit
+  // direct dans un handler).
   const killSync = (): void => {
     if (stopped) return
     stopped = true
@@ -440,8 +453,8 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     const currentPid = pid
     if (!current || !currentPid) return
     try {
-      if (process.platform !== "win32") process.kill(-currentPid, "SIGTERM")
-      else current.kill("SIGTERM")
+      if (process.platform !== "win32") process.kill(-currentPid, "SIGKILL")
+      else current.kill("SIGKILL")
     } catch {
       /* déjà mort */
     }
