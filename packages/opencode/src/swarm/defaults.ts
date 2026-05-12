@@ -11,10 +11,10 @@
 
 export const SWARM_DEFAULTS = {
   /** URL du fabi-registry (auto-discovery). Sans trailing slash. */
-  registry: "http://37.59.98.16:3002",
+  registry: "https://server.undefinedstudio.fr/fabi-registry",
 
   /** Fallback : URL HTTP du scheduler si le registry est injoignable. */
-  scheduler: "http://37.59.98.16:3001",
+  scheduler: "https://server.undefinedstudio.fr/fabi-scheduler",
 
   /** Fallback : PeerID Lattica/libp2p si le registry est injoignable. */
   schedulerPeer: "12D3KooWKLCTHRAhMEafQfaGZTAEx8kJjeMqpXDDeyhBGVotuSfR",
