@@ -128,10 +128,12 @@ function applyEventToState(evt: FabiEvent): void {
     case "weights_load_progress": {
       const done = typeof evt.files_done === "number" ? evt.files_done : undefined
       const total = typeof evt.files_total === "number" ? evt.files_total : undefined
+      const file = typeof evt.file_name === "string" ? evt.file_name : undefined
       patchSwarmActiveState({
         workerStage: "loading-weights",
         weightsFilesDone: done,
         weightsFilesTotal: total,
+        weightsCurrentFile: file,
       })
       return
     }
@@ -141,6 +143,7 @@ function applyEventToState(evt: FabiEvent): void {
         workerStage: "ready",
         weightsFilesDone: total,
         weightsFilesTotal: total,
+        weightsCurrentFile: undefined,
       })
       return
     }

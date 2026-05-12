@@ -103,6 +103,14 @@ export interface SwarmStateDetail {
   workerPhase: SwarmWorkerPhase
   model?: string
   swarmId?: string
+
+  // Signaux directs du worker, rebalancés pour l'UI (forwarder pour ne pas
+  // forcer chaque consommateur à importer swarm/state).
+  workerStage?: SwarmActiveState["workerStage"]
+  workerPeerId?: string
+  weightsCurrentFile?: string
+  weightsFilesDone?: number
+  weightsFilesTotal?: number
 }
 
 function deriveReasons(
@@ -262,6 +270,11 @@ export function useSwarmState(): () => SwarmStateDetail {
       workerPhase: w.phase,
       model: w.swarmModel ?? s.model,
       swarmId: w.swarmId,
+      workerStage: w.workerStage,
+      workerPeerId: w.workerPeerId,
+      weightsCurrentFile: w.weightsCurrentFile,
+      weightsFilesDone: w.weightsFilesDone,
+      weightsFilesTotal: w.weightsFilesTotal,
     }
   })
 }

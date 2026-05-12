@@ -23,40 +23,73 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "@tui/context/theme"
 import { Spinner } from "./spinner"
 import { useSwarmState, type SwarmBlockingReason } from "./use-swarm-state"
-import { formatElapsed, useAnimatedDots, useCyclingWord, useElapsedSeconds } from "./cycling-text"
+import { formatElapsed, useAnimatedDots, useElapsedSeconds } from "./cycling-text"
+import type { SwarmStateDetail } from "./use-swarm-state"
 
 /**
- * Mots de chargement contextuels — on choisit la liste selon la phase
- * réelle. Ça évite d'afficher "Downloading model" quand en fait notre
- * worker n'a même pas fini son handshake P2P.
+ * Renvoie UNE phrase qui décrit ce que le worker fait VRAIMENT en ce moment,
+ * dérivée des signaux observés (events worker, status scheduler). Pas de
+ * carrousel de mots décoratifs — si le texte change, c'est parce que l'état
+ * réel a changé. La liveness visuelle est portée par les dots animés.
+ *
+ * Priorité (la première vraie info gagne) :
+ *   1. workerStage : events `[FABI] ...` reçus du worker (le plus précis)
+ *   2. reasons : raisons bloquantes dérivées (worker pas démarré, scheduler
+ *      injoignable, etc.)
+ *   3. nodesInitializing côté scheduler : on charge mais pas via NOUS
  */
-const WORDS_LOADING_MODEL = [
-  "Downloading model",
-  "Loading layers",
-  "Refitting weights",
-  "Booting workers",
-] as const
+function describeRealActivity(state: SwarmStateDetail): string {
+  // 1. Signaux directs du worker — préférence absolue
+  switch (state.workerStage) {
+    case "handshake":
+      return "Building peer-to-peer connection"
+    case "joining":
+      return "Requesting layer assignment from scheduler"
+    case "loading-weights": {
+      const done = state.weightsFilesDone
+      const total = state.weightsFilesTotal
+      if (total && total > 0 && done !== undefined) {
+        const human = state.weightsCurrentFile
+          ? `Loading ${state.weightsCurrentFile}`
+          : `Loading weights file ${done + 1} of ${total}`
+        return human
+      }
+      return "Loading model weights into GPU"
+    }
+    case "alloc-timeout":
+      return "Scheduler did not assign any layers"
+    case "ready":
+      return "Worker ready"
+  }
 
-const WORDS_JOINING = [
-  "Connecting to scheduler",
-  "Negotiating P2P relay",
-  "Announcing on Lattica",
-  "Discovering peers",
-] as const
+  // 2. Raisons bloquantes — décrit ce qu'on attend, pas un état worker
+  for (const r of state.reasons) {
+    switch (r.kind) {
+      case "worker-not-started":
+        if (r.phase === "starting") return "Starting Parallax process"
+        if (r.phase === "idle") return "Preparing worker"
+        return `Worker is ${r.phase}`
+      case "worker-crashed":
+        return r.lastError ?? "Worker exited unexpectedly"
+      case "worker-missing-binary":
+        return "Parallax binary missing"
+      case "scheduler-unreachable":
+        return "Scheduler is not responding"
+      case "connecting-to-swarm":
+        // Worker démarré mais pas encore d'event peer_id : il est dans le
+        // build_lattica (DHT bootstrap, NAT detection, relay negotiation).
+        return "Discovering scheduler over Lattica DHT"
+      case "loading-model":
+        // Vue scheduler uniquement (pas nos events) : c'est UN AUTRE peer qui
+        // charge, pas nous. Honnête : on attend qu'ils finissent.
+        return r.nodesInitializing === 1
+          ? "Waiting for peer to finish loading the model"
+          : `Waiting for ${r.nodesInitializing} peers to finish loading`
+    }
+  }
 
-const WORDS_STARTING = [
-  "Starting your worker",
-  "Spawning Parallax",
-  "Preparing GPU",
-] as const
-
-function pickWordList(reasons: SwarmBlockingReason[]): readonly string[] {
-  if (reasons.some((r) => r.kind === "loading-model")) return WORDS_LOADING_MODEL
-  if (reasons.some((r) => r.kind === "connecting-to-swarm")) return WORDS_JOINING
-  if (reasons.some((r) => r.kind === "worker-not-started")) return WORDS_STARTING
-  // Fallback : on garde les mots "loading model" comme défaut générique
-  // (cas où une autre raison non-critique a été ajoutée plus tard).
-  return WORDS_LOADING_MODEL
+  // 3. Fallback : seul cas restant = ready (filtré ailleurs).
+  return "Ready"
 }
 
 /**
@@ -151,9 +184,10 @@ export function SwarmGate() {
   const headline = createMemo(() => pickHeadline(state().reasons))
   const criticalDetail = createMemo(() => pickCriticalDetail(state().reasons))
   const infoSubline = createMemo(() => pickInfoSubline(state().reasons))
-  // Liste de mots cyclants choisie réactivement selon la phase — getter
-  // passé à useCyclingWord qui relit la liste à chaque tick.
-  const cyclingWord = useCyclingWord(() => pickWordList(state().reasons))
+  // Texte décrivant CE qui se passe réellement, calculé depuis l'état
+  // observé du worker et du scheduler. Pas un carrousel de mots — il change
+  // QUAND l'état change. Les dots animés portent la liveness visuelle.
+  const realActivity = createMemo(() => describeRealActivity(state()))
   const dots = useAnimatedDots()
 
   // Timer écoulé depuis l'apparition du gate. Reset automatique quand
@@ -217,13 +251,15 @@ export function SwarmGate() {
             <Spinner color={theme.primary} />
           </box>
 
-          {/* Détail critique OU mot qui cycle */}
+          {/* Détail critique OU description honnête de l'activité courante.
+              Les dots animés portent la liveness visuelle (process vivant)
+              sans qu'on ait à mentir sur ce qui se passe. */}
           <text> </text>
           <Show
             when={criticalDetail()}
             fallback={
               <text fg={theme.textMuted}>
-                {cyclingWord()}
+                {realActivity()}
                 {dots()}
               </text>
             }

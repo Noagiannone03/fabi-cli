@@ -82,6 +82,8 @@ export interface SwarmActiveState {
   /** Progress de chargement des safetensors (0..total). */
   weightsFilesDone?: number
   weightsFilesTotal?: number
+  /** Nom du fichier en cours de chargement (model-00003-of-00005.safetensors…). */
+  weightsCurrentFile?: string
 }
 
 let state: SwarmActiveState = { phase: "idle" }
