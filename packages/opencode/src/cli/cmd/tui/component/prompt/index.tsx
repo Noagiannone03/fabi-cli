@@ -1182,7 +1182,11 @@ export function Prompt(props: PromptProps) {
   const swarmWaitingForPeers = createMemo(() => {
     const reasons = swarmState().reasons
     if (reasons.length === 0) return false
-    return reasons.every((r) => r.kind === "need-more-peers")
+    // Need-more-peers (sous le seuil) ET insufficient-capacity (assez de
+    // peers mais alloc layers a échoué) ont la même UX inline : on attend.
+    return reasons.every(
+      (r) => r.kind === "need-more-peers" || r.kind === "insufficient-capacity",
+    )
   })
   const chatLoadingVisible = createMemo(() => {
     const t = status().type
@@ -1546,14 +1550,17 @@ export function Prompt(props: PromptProps) {
             <box flexDirection="row" gap={1}>
               <text fg={theme.primary} attributes={TextAttributes.BOLD}>▍</text>
               <text fg={theme.text} attributes={TextAttributes.BOLD}>
-                Waiting for more peers in the swarm
+                {swarmState().reasons.some((r) => r.kind === "insufficient-capacity")
+                  ? "Swarm capacity is insufficient"
+                  : "Waiting for more peers in the swarm"}
               </text>
               <Spinner color={theme.primary} />
             </box>
             <text> </text>
             <text fg={theme.textMuted}>
-              The pipeline needs more contributors before inference can run.
-              You can chat as soon as enough peers join.
+              {swarmState().reasons.some((r) => r.kind === "insufficient-capacity")
+                ? "Current peers can't fit the model's layers between them. More peers — or peers with more GPU memory — will let the scheduler form a pipeline."
+                : "The pipeline needs more contributors before inference can run. You can chat as soon as enough peers join."}
             </text>
             <Show when={swarmState().nodesTotal > 0}>
               <text> </text>

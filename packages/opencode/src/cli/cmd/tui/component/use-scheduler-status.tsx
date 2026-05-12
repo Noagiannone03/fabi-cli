@@ -23,7 +23,26 @@ const FETCH_TIMEOUT_MS = 2_500
 
 export interface SchedulerNode {
   node_id: string
+  /** Legacy "available" (is_active=True) | "waiting" (is_active=False). */
   status: string
+  /**
+   * Lifecycle role exposé par notre fork swarm-engine :
+   *   "active"  — node alloué à un pipeline (porte des layers)
+   *   "standby" — node en réserve (rien à servir actuellement)
+   * Null si la version du scheduler ne l'expose pas (clone non patché).
+   */
+  node_state?: "active" | "standby" | null
+  /**
+   * Phase rapportée par le worker (parallax.p2p.ServerState) :
+   *   "joining"       — handshake Lattica/scheduler en cours
+   *   "initializing"  — layers alloués, en train de télécharger/charger le modèle
+   *   "ready"         — refit terminé, prêt à servir
+   *   "offline" | "error" — état terminal
+   */
+  loading_phase?: string
+  /** Plage de couches allouées (inclusive / exclusive). */
+  start_layer?: number | null
+  end_layer?: number | null
   gpu_name?: string
   gpu_memory?: number
 }
@@ -46,6 +65,21 @@ export interface SchedulerStatusDetail {
   initNodesNum?: number
   /** Si true, le swarm a besoin de plus de peers pour former un pipeline. */
   needMoreNodes?: boolean
+  /**
+   * Résultat du dernier appel à `Scheduler.bootstrap()` (fork Fabi) :
+   *   null                         — jamais tenté (scheduler pas init)
+   *   "pending"                    — round en cours
+   *   "success"                    — pipeline formé
+   *   "failed_capacity"            — assez de nodes, mais l'alloc des layers
+   *                                  n'a pas tenu (capacité GPU insuffisante)
+   *   "deferred_not_enough_nodes"  — sous le seuil min_nodes_bootstrapping
+   *
+   * C'est LE signal solide pour décider entre "alloc en cours" et
+   * "alloc échouée, il faut plus de peers" — pas un timer.
+   */
+  lastBootstrapResult?: string | null
+  /** Timestamp Unix (s) du dernier appel à bootstrap(). 0 si jamais. */
+  lastBootstrapAttemptTs?: number
   /** Nombre de requêtes simultanées que le pipeline peut traiter (0 = pas prêt). */
   maxRunningRequest?: number
 }
@@ -93,6 +127,8 @@ async function tick(): Promise<void> {
           node_list?: SchedulerNode[]
           init_nodes_num?: number
           need_more_nodes?: boolean
+          last_bootstrap_result?: string | null
+          last_bootstrap_attempt_ts?: number
           max_running_request?: number
         }
       }
@@ -104,6 +140,11 @@ async function tick(): Promise<void> {
         nodes: Array.isArray(data.node_list) ? data.node_list : [],
         initNodesNum: typeof data.init_nodes_num === "number" ? data.init_nodes_num : undefined,
         needMoreNodes: Boolean(data.need_more_nodes),
+        lastBootstrapResult: data.last_bootstrap_result ?? null,
+        lastBootstrapAttemptTs:
+          typeof data.last_bootstrap_attempt_ts === "number"
+            ? data.last_bootstrap_attempt_ts
+            : 0,
         maxRunningRequest: data.max_running_request,
       })
     }

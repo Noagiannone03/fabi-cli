@@ -9,7 +9,7 @@
 //
 // Le SwarmGate consomme ce hook et reste affiché tant que `ready = false`.
 
-import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+import { createMemo, createSignal, onCleanup } from "solid-js"
 import {
   getSwarmActiveState,
   subscribeSwarmActiveState,
@@ -22,7 +22,7 @@ import { useSchedulerStatus, type SchedulerStatusDetail } from "./use-scheduler-
  * Une raison concrète pour laquelle le swarm n'est pas prêt. Le SwarmGate
  * itère dessus pour afficher des bullets actionnables à l'utilisateur.
  *
- * Sémantique alignée sur le code Parallax (cf swarm-engine/src/scheduling) :
+ * Sémantique alignée sur le fork swarm-engine (cf swarm-engine/src/scheduling) :
  *
  *   NodeState.ACTIVE  ⇔  node alloué à un pipeline (porte des layers)
  *   NodeState.STANDBY ⇔  node connecté mais en réserve (rien à servir)
@@ -36,26 +36,26 @@ import { useSchedulerStatus, type SchedulerStatusDetail } from "./use-scheduler-
  *                                       ces nodes sont encore en refit)
  *   cluster.status === "waiting"    ⇔  aucune chaîne complète allocable
  *
- *   /cluster/status_json.node_list  =  TOUS les nodes (ACTIVE et STANDBY)
- *                                      avec `status` dérivé de `is_active`
+ * **Signal solide pour distinguer les cas en `status="waiting"`** :
+ *   le fork Fabi expose `last_bootstrap_result` qui dit EXPLICITEMENT
+ *   pourquoi le scheduler attend :
+ *     - "deferred_not_enough_nodes" → sous le seuil min_nodes_bootstrapping
+ *     - "failed_capacity"           → assez de nodes mais l'alloc des layers
+ *                                     n'a pas tenu (capacité GPU insuffisante)
+ *     - "pending" / null            → round en cours (transitoire)
+ *     - "success"                   → pipeline formé (status devrait être
+ *                                     "available", sauf re-bootstrap en cours)
+ *   Plus de timer arbitraire — on lit le verdict du scheduler directement.
  *
- * **Conséquence importante** : si M4 Pro (ACTIVE, is_active=True) porte
- * tout le modèle et M3 (STANDBY, is_active=False) est en redondance, on a
- * `node_list = [{status: "available"}, {status: "waiting"}]`. Le swarm
- * PEUT servir (le pipeline est formé et ready côté M4), mais une logique
- * naïve "nodesWaiting > 0 → loading" garderait le popup ouvert à tort.
- *
- * Règle correcte pour "ready à chatter" :
- *   cluster.status === "available"  ET  au moins UN node is_active=True
- *
- * Règle pour "encore en refit / téléchargement" :
- *   cluster.status === "available"  ET  AUCUN node is_active=True yet
- *   → c'est le cas du premier boot où le pipeline est alloué mais le node
- *     porteur n'a pas encore fini de charger ses layers.
+ * **Signal solide pour distinguer "downloading" vs "ready"** :
+ *   le fork Fabi expose `loading_phase` par node (joining / initializing /
+ *   ready / offline / error) — propagé depuis la `ServerState` du worker
+ *   Parallax. Un node en "initializing" télécharge/charge ses layers.
  *
  * `need_more_nodes` exposé par /cluster/status_json est volontairement
  * IGNORÉ : il flippe à False dès le premier bootstrap (même raté), donc
  * il ment dans le cas typique "j'ai pas assez de capacité pour ce modèle".
+ * On utilise `last_bootstrap_result` à la place.
  */
 export type SwarmBlockingReason =
   | { kind: "worker-not-started"; phase: SwarmWorkerPhase }
@@ -63,8 +63,18 @@ export type SwarmBlockingReason =
   | { kind: "worker-missing-binary" }
   | { kind: "scheduler-unreachable" }
   | { kind: "connecting-to-swarm" }
+  /** Sous le seuil opérateur (`min_nodes_bootstrapping`). Le scheduler ne tentera même pas l'alloc. */
   | { kind: "need-more-peers"; nodesTotal: number }
-  | { kind: "loading-model"; nodesWaiting: number; nodesTotal: number }
+  /** bootstrap a échoué : capacité insuffisante. Plus de peers répartiraient les layers. */
+  | { kind: "insufficient-capacity"; nodesTotal: number }
+  /** Pipeline alloué côté scheduler, le worker télécharge/charge le modèle. */
+  | {
+      kind: "loading-model"
+      nodesTotal: number
+      nodesInitializing: number
+      /** Si on connaît l'allocation : nombre de layers à charger pour ce node. */
+      layersAssigned?: number
+    }
 
 export interface SwarmStateDetail {
   /** True ssi aucune raison bloquante n'est présente. */
@@ -83,27 +93,10 @@ export interface SwarmStateDetail {
   swarmId?: string
 }
 
-/**
- * Grace period UNIQUEMENT quand `nodes.length >= init_nodes_num` ET
- * `status="waiting"`. Couvre la staleness du poll (4s) + le temps que le
- * scheduler Parallax termine son round de bootstrap (`Scheduler.bootstrap()`
- * est appelé SYNCHRONIQUEMENT dans `_process_joins` dès qu'un node atteint le
- * seuil — ça prend ~100ms côté scheduler, mais notre poll peut tomber juste
- * avant). 8s = 2 cycles de poll, suffisant pour observer le résultat même au
- * pire timing. Après ça : si `status` est encore "waiting", l'allocation a
- * échoué pour de bon (capacité GPU insuffisante) et plus de peers aideraient.
- *
- * À l'inverse, si `nodes.length < init_nodes_num`, on est SOUS le seuil
- * opérateur — le scheduler ne tentera même PAS de bootstrap. Aucune raison
- * d'attendre : on affiche "need-more-peers" tout de suite.
- */
-const BOOTSTRAP_GRACE_MS = 8_000
-
 function deriveReasons(
   worker: SwarmActiveState,
   sched: SchedulerStatusDetail,
   schedLoading: boolean,
-  nodesFirstSeenMs: number | null,
 ): SwarmBlockingReason[] {
   const reasons: SwarmBlockingReason[] = []
 
@@ -134,60 +127,81 @@ function deriveReasons(
 
   const nodesTotal = sched.nodes.length
   const nodesActive = sched.nodes.filter((n) => n.status === "available").length
+  // Nodes en cours de chargement de leur shard de modèle. On préfère le
+  // `loading_phase` (exposé par notre fork swarm-engine) au flag binaire
+  // `is_active` : un node en "initializing" est explicitement en train de
+  // télécharger/charger les layers qu'on lui a alloués.
+  const nodesInitializing = sched.nodes.filter(
+    (n) => n.loading_phase === "initializing",
+  ).length
 
   // --- Pipeline formé côté scheduler ---
   if (sched.status === "available") {
     // Au moins un node a fini son refit ⇒ le pipeline est servable.
-    // Les autres nodes "waiting" sont soit en STANDBY (réserve, pas
-    // dans le pipeline), soit en cours de refit dans un autre pipeline
-    // (multi-shard) — ni l'un ni l'autre ne nous empêche de chatter.
-    if (nodesActive > 0) {
-      return reasons // pas de raison bloquante restante → ready
-    }
-    // Pipeline alloué mais AUCUN node n'a encore terminé son refit :
-    // c'est le boot initial après allocation, on télécharge le modèle.
-    reasons.push({ kind: "loading-model", nodesWaiting: nodesTotal, nodesTotal })
+    // Les autres nodes "waiting" peuvent être en STANDBY (réserve, pas de
+    // popup nécessaire — on peut chatter via le pipeline actif) ou bien en
+    // cours d'init dans un autre pipeline — pas bloquant non plus.
+    if (nodesActive > 0) return reasons // → ready, gate ferme
+
+    // Pipeline alloué mais aucun node n'a fini son refit. On affiche le
+    // chargement avec, si dispo, le nombre de layers à charger pour notre
+    // node (info précieuse pour calibrer l'attente : 4 layers ≠ 30 layers).
+    const myNode = sched.nodes.find((n) => n.loading_phase === "initializing") ?? sched.nodes[0]
+    const layersAssigned =
+      myNode && typeof myNode.start_layer === "number" && typeof myNode.end_layer === "number"
+        ? myNode.end_layer - myNode.start_layer
+        : undefined
+    reasons.push({
+      kind: "loading-model",
+      nodesTotal,
+      nodesInitializing,
+      layersAssigned,
+    })
     return reasons
   }
 
-  // --- cluster.status === "waiting" : pipeline non formé ---
+  // --- cluster.status === "waiting" : pas de pipeline ---
   if (nodesTotal === 0) {
-    // Personne n'est encore visible côté scheduler. Soit notre worker
-    // n'a pas fini son handshake Lattica/P2P (cas usuel), soit le swarm
-    // est vraiment vide. Dans les deux cas → "connecting".
+    // Pas encore de node visible côté scheduler — handshake Lattica/P2P en
+    // cours. Si notre worker rapporte "joining", c'est explicitement notre
+    // handshake. Sinon (worker pas démarré, swarm vide), même message.
     reasons.push({ kind: "connecting-to-swarm" })
     return reasons
   }
 
-  // À partir d'ici : nodesTotal > 0 et status="waiting". Décide entre
-  // "need-more-peers" et "connecting" SUR DES SIGNAUX RÉELS du scheduler.
+  // On a des nodes mais pas de pipeline. Le scheduler nous DIT pourquoi via
+  // last_bootstrap_result (fork Fabi). Plus de timer arbitraire — on lit
+  // directement l'état réel du bootstrap.
+  const bootstrap = sched.lastBootstrapResult
   const initNodes = sched.initNodesNum ?? 1
 
-  if (nodesTotal < initNodes) {
-    // Sous le seuil opérateur (`min_nodes_bootstrapping`) : le scheduler ne
-    // tentera PAS de bootstrap tant qu'on n'a pas atteint initNodes. Pas
-    // d'ambiguïté possible → besoin de plus de peers, immédiat.
+  if (bootstrap === "failed_capacity") {
+    // Le scheduler a essayé d'allouer les layers et n'a pas réussi à former
+    // un pipeline complet avec les peers actuels. Ajouter des peers PEUT
+    // débloquer (plus de RAM disponible pour shard le modèle).
+    reasons.push({ kind: "insufficient-capacity", nodesTotal })
+    return reasons
+  }
+
+  if (bootstrap === "deferred_not_enough_nodes" || nodesTotal < initNodes) {
+    // Sous le seuil. Le scheduler attend explicitement plus de nodes avant
+    // de tenter quoi que ce soit. Pas d'ambiguïté.
     reasons.push({ kind: "need-more-peers", nodesTotal })
     return reasons
   }
 
-  // nodesTotal >= initNodes et status="waiting". Deux cas indistinguables
-  // depuis l'API à un instant T :
-  //   a) bootstrap() en cours / juste terminé mais notre poll est stale (4s)
-  //   b) bootstrap() a échoué (capacité GPU/RAM insuffisante)
-  //
-  // Côté Parallax, bootstrap() est appelé synchroniquement dans
-  // _process_joins() dès qu'un node franchit le seuil — donc (a) se résout
-  // en ~100ms côté scheduler. On laisse 8s pour absorber 2 cycles de poll
-  // (worst-case), après quoi on conclut que c'est (b) : un peer de plus
-  // permettrait de répartir les layers et de former un pipeline.
-  const ageMs = nodesFirstSeenMs !== null ? Date.now() - nodesFirstSeenMs : BOOTSTRAP_GRACE_MS
-  if (ageMs < BOOTSTRAP_GRACE_MS) {
+  if (bootstrap === "pending" || bootstrap === null) {
+    // Round de bootstrap en cours OU pas encore tenté (scheduler vient de
+    // démarrer). C'est transitoire : un nouveau join va le déclencher.
     reasons.push({ kind: "connecting-to-swarm" })
-  } else {
-    reasons.push({ kind: "need-more-peers", nodesTotal })
+    return reasons
   }
 
+  // bootstrap === "success" mais status="waiting" : c'est contradictoire
+  // (le scheduler a réussi un bootstrap mais le pipeline est cassé depuis).
+  // Cas possible : un node ACTIVE a quitté, on est en re-bootstrap. Conservons
+  // un état "connecting" parce que ça va se résoudre dès le prochain join.
+  reasons.push({ kind: "connecting-to-swarm" })
   return reasons
 }
 
@@ -197,20 +211,10 @@ export function useSwarmState(): () => SwarmStateDetail {
   const unsub = subscribeSwarmActiveState(setWorker)
   onCleanup(unsub)
 
-  // Timestamp (ms) du premier poll où des nodes étaient visibles. Sert à la
-  // grace period "connecting-to-swarm" avant de conclure "need-more-peers".
-  // Remis à null si les nodes disparaissent (scheduler restart, etc.).
-  const [nodesFirstSeenMs, setNodesFirstSeenMs] = createSignal<number | null>(null)
-  createEffect(() => {
-    const hasNodes = sched.status().nodes.length > 0
-    if (hasNodes && nodesFirstSeenMs() === null) setNodesFirstSeenMs(Date.now())
-    else if (!hasNodes && nodesFirstSeenMs() !== null) setNodesFirstSeenMs(null)
-  })
-
   return createMemo<SwarmStateDetail>(() => {
     const w = worker()
     const s = sched.status()
-    const reasons = deriveReasons(w, s, sched.loading(), nodesFirstSeenMs())
+    const reasons = deriveReasons(w, s, sched.loading())
 
     return {
       ready: reasons.length === 0,
