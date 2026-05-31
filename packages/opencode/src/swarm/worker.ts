@@ -37,40 +37,127 @@ interface WorkerLimits {
   kvBlockSize: string
 }
 
-function pickWorkerLimits(): WorkerLimits {
-  const isAppleSilicon =
-    process.platform === "darwin" && process.arch === "arm64"
-  const ramGb = Math.round(totalmem() / 2 ** 30)
+/**
+ * Accélérateur effectif du nœud. On dérive les limites worker de ça :
+ *  - `apple-silicon` : mémoire unifiée partagée (Metal sur la RAM OS).
+ *  - `cuda` : VRAM dédiée NVIDIA (natif Linux OU Windows via WSL — dans les
+ *    deux cas `process.platform === "linux"` et `nvidia-smi` est présent).
+ *  - `generic` : CPU / GPU non détecté → defaults prudents Fabi.
+ */
+export type Accelerator = "apple-silicon" | "cuda" | "generic"
 
-  // Defaults Fabi (ce qu'on validait dans le fork patch 545a902). Convient
-  // à un agentic CLI : prompts >4k tokens fréquents, peu de concurrence.
-  let limits: WorkerLimits = {
-    maxBatchSize: "8",
-    maxSequenceLength: "32768",
-    maxNumTokensPerBatch: "16384",
-    kvBlockSize: "32",
+export interface HardwareProfile {
+  accelerator: Accelerator
+  /** RAM système en GB (Apple Silicon : mémoire unifiée). */
+  ramGb: number
+  /** VRAM totale du plus petit GPU CUDA détecté, en GB (undefined si non-CUDA). */
+  vramGb?: number
+}
+
+// Defaults Fabi (validés dans le fork patch 545a902). Conviennent à un agentic
+// CLI : prompts >4k tokens fréquents, peu de concurrence parallèle.
+const FABI_DEFAULT_LIMITS: WorkerLimits = {
+  maxBatchSize: "8",
+  maxSequenceLength: "32768",
+  maxNumTokensPerBatch: "16384",
+  kvBlockSize: "32",
+}
+
+/**
+ * Calcule les limites worker à partir d'un profil matériel — **fonction pure**
+ * (testable sans hardware). La taille du KV cache scale en `batch × sequence`,
+ * c'est l'équivalent du `attn_cache_tokens` de Petals : sur une machine de
+ * travail (desktop + browser actifs), des limites trop hautes saturent la
+ * mémoire de l'accélérateur dès le premier prefill et freezent le poste.
+ *
+ * Tiers Apple Silicon = sur la RAM unifiée (Metal partage la RAM OS).
+ * Tiers CUDA = sur la VRAM dédiée (le KV cache vit dans la VRAM, en plus des
+ * poids ; `cuda_memory.py` côté moteur borne déjà la *fraction* allouable façon
+ * `gpu_memory_utilization` vLLM, mais ne réduit pas le besoin batch × seq).
+ */
+export function resolveWorkerLimits(hw: HardwareProfile): WorkerLimits {
+  if (hw.accelerator === "apple-silicon" && hw.ramGb < 64) {
+    // Mémoire unifiée : à batch=8 / seq=32768 on flingue 16 GB unifiés au
+    // premier prefill (RAM OS + browser sur le même pool).
+    if (hw.ramGb <= 24) {
+      return { maxBatchSize: "1", maxSequenceLength: "16384", maxNumTokensPerBatch: "8192", kvBlockSize: "32" }
+    }
+    return { maxBatchSize: "2", maxSequenceLength: "32768", maxNumTokensPerBatch: "16384", kvBlockSize: "32" }
   }
 
-  if (isAppleSilicon && ramGb < 64) {
-    // Mémoire unifiée partagée Apple Silicon : Metal alloue
-    // batch × seq buffers sur la même RAM que l'OS + le browser. À
-    // batch=8 / seq=32768 on flingue 16 GB unifiés au premier prefill.
-    if (ramGb <= 24) {
-      limits = {
-        maxBatchSize: "1",
-        maxSequenceLength: "16384",
-        maxNumTokensPerBatch: "8192",
-        kvBlockSize: "32",
-      }
-    } else {
-      limits = {
-        maxBatchSize: "2",
-        maxSequenceLength: "32768",
-        maxNumTokensPerBatch: "16384",
-        kvBlockSize: "32",
-      }
+  if (hw.accelerator === "cuda" && hw.vramGb !== undefined) {
+    // Tiers VRAM consumer/workstation NVIDIA. En dessous de 24 GB on borne
+    // batch × seq pour garder de la VRAM au desktop/affichage et éviter l'OOM
+    // CUDA sous charge. ≥24 GB (3090/4090/A6000…) → defaults pleins.
+    // On arrondit au GB : nvidia-smi reporte la VRAM "utile" (ex. 24564 MiB ≈
+    // 23.99 GB pour une 4090), un seuil strict la ferait chuter d'un tier.
+    const vram = Math.round(hw.vramGb)
+    if (vram <= 8) {
+      // 3050/4050 laptop, 3060 8 GB : le strict minimum jouable.
+      return { maxBatchSize: "1", maxSequenceLength: "8192", maxNumTokensPerBatch: "4096", kvBlockSize: "16" }
+    }
+    if (vram <= 12) {
+      // 3060 12 GB, 4070.
+      return { maxBatchSize: "1", maxSequenceLength: "16384", maxNumTokensPerBatch: "8192", kvBlockSize: "32" }
+    }
+    if (vram <= 16) {
+      // 4060 Ti 16 GB, 4070 Ti SUPER.
+      return { maxBatchSize: "2", maxSequenceLength: "16384", maxNumTokensPerBatch: "8192", kvBlockSize: "32" }
+    }
+    if (vram < 24) {
+      // 3080 20 GB / cartes 20-23 GB.
+      return { maxBatchSize: "2", maxSequenceLength: "32768", maxNumTokensPerBatch: "16384", kvBlockSize: "32" }
     }
   }
+
+  return { ...FABI_DEFAULT_LIMITS }
+}
+
+/**
+ * VRAM totale (GB) du plus petit GPU NVIDIA visible, via `nvidia-smi`.
+ * On prend le min en multi-GPU pour rester conservateur (Parallax peut
+ * pipeliner sur la plus petite carte). Renvoie undefined si nvidia-smi est
+ * absent ou n'a rien retourné d'exploitable.
+ */
+function detectCudaVramGb(): number | undefined {
+  const r = spawnSync(
+    "nvidia-smi",
+    ["--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+    { encoding: "utf8", timeout: 5000 },
+  )
+  if (r.status !== 0 || !r.stdout) return undefined
+  const mibValues = r.stdout
+    .split(/\r?\n/)
+    .map((l) => parseInt(l.trim(), 10))
+    .filter((n) => Number.isFinite(n) && n > 0)
+  if (mibValues.length === 0) return undefined
+  return Math.min(...mibValues) / 1024
+}
+
+/** Détecte le profil matériel effectif (avec appel hardware pour CUDA). */
+function detectHardware(): HardwareProfile {
+  const ramGb = Math.round(totalmem() / 2 ** 30)
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    return { accelerator: "apple-silicon", ramGb }
+  }
+  // Natif Linux+NVIDIA ET Windows→WSL CUDA exposent tous deux nvidia-smi.
+  const vramGb = detectCudaVramGb()
+  if (vramGb !== undefined) return { accelerator: "cuda", ramGb, vramGb }
+  return { accelerator: "generic", ramGb }
+}
+
+// Le profil matériel ne change pas pendant la session — on mémoïse pour ne pas
+// re-shell nvidia-smi à chaque (re)spawn du worker.
+let cachedHardware: HardwareProfile | null = null
+function getHardware(): HardwareProfile {
+  if (!cachedHardware) cachedHardware = detectHardware()
+  return cachedHardware
+}
+
+function pickWorkerLimits(): WorkerLimits {
+  const hw = getHardware()
+  const limits = resolveWorkerLimits(hw)
+  log.info("worker hardware profile", { ...hw })
 
   // L'user peut tout overrider via env (la TUI ou un script wrapper).
   return {
@@ -92,17 +179,24 @@ function pickWorkerLimits(): WorkerLimits {
  */
 function buildWorkerEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env }
-  const isAppleSilicon =
-    process.platform === "darwin" && process.arch === "arm64"
-  if (!isAppleSilicon) return env
-
-  const ramGb = Math.round(totalmem() / 2 ** 30)
-  if (ramGb >= 64) return env
-
+  const hw = getHardware()
   const setIfUnset = (key: string, value: string) => {
     if (!env[key]?.trim()) env[key] = value
   }
-  setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", ramGb <= 24 ? "4" : "6")
+
+  if (hw.accelerator === "apple-silicon" && hw.ramGb < 64) {
+    // Réserve RAM système pour ne pas évincer l'OS sur mémoire unifiée.
+    setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", hw.ramGb <= 24 ? "4" : "6")
+    return env
+  }
+
+  if (hw.accelerator === "cuda" && hw.vramGb !== undefined && Math.round(hw.vramGb) < 24) {
+    // Workstation-safe : sur une carte consumer qui pilote aussi l'affichage,
+    // on garde plus de marge que le défaut 1.5 GB de cuda_memory.py pour que le
+    // desktop/browser ne se fassent pas évincer quand leur usage VRAM grandit
+    // en cours de session. Lu par resolve_cuda_memory_budget côté moteur.
+    setIfUnset("PARALLAX_CUDA_SYSTEM_RESERVE_GB", Math.round(hw.vramGb) <= 12 ? "2" : "1.5")
+  }
   return env
 }
 
