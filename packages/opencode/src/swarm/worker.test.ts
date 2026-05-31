@@ -1,7 +1,7 @@
 // Tests sur le tiering mémoire des limites worker (fonction pure, sans hardware).
 
-import { describe, expect, test } from "bun:test"
-import { resolveWorkerLimits, type HardwareProfile } from "./worker"
+import { afterEach, describe, expect, test } from "bun:test"
+import { prefixCacheEnabled, resolveWorkerLimits, type HardwareProfile } from "./worker"
 
 const DEFAULTS = {
   maxBatchSize: "8",
@@ -66,5 +66,26 @@ describe("resolveWorkerLimits — CUDA (VRAM tiers)", () => {
 describe("resolveWorkerLimits — generic / CPU", () => {
   test("pas d'accélérateur détecté → defaults pleins", () => {
     expect(resolveWorkerLimits(hw({ accelerator: "generic" }))).toEqual(DEFAULTS)
+  })
+})
+
+describe("prefixCacheEnabled — opt-out env", () => {
+  const original = process.env.FABI_PREFIX_CACHE
+  afterEach(() => {
+    if (original === undefined) delete process.env.FABI_PREFIX_CACHE
+    else process.env.FABI_PREFIX_CACHE = original
+  })
+
+  test("activé par défaut (var absente)", () => {
+    delete process.env.FABI_PREFIX_CACHE
+    expect(prefixCacheEnabled()).toBe(true)
+  })
+  test.each(["0", "false", "off", "no", "FALSE", " Off "])("désactivé par %p", (v) => {
+    process.env.FABI_PREFIX_CACHE = v
+    expect(prefixCacheEnabled()).toBe(false)
+  })
+  test.each(["1", "true", "on", "yes"])("activé par %p", (v) => {
+    process.env.FABI_PREFIX_CACHE = v
+    expect(prefixCacheEnabled()).toBe(true)
   })
 })

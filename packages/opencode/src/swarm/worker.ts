@@ -201,6 +201,22 @@ function buildWorkerEnv(): NodeJS.ProcessEnv {
 }
 
 /**
+ * Active le prefix cache (réutilisation du KV cache pour les préfixes communs,
+ * le `BlockRadixCache` du fork — équivalent RadixAttention sglang). Le moteur
+ * l'implémente sur tous les backends (MLX/sglang/vLLM) mais le laisse OFF par
+ * défaut. Pour un CLI agentique c'est LE gros gain : le system prompt + tout
+ * l'historique de conversation sont identiques d'un tour à l'autre, donc le
+ * prefill est quasi gratuit après le premier message (first-token latency qui
+ * s'effondre, 50-99% de hit selon la charge). On l'active par défaut et on
+ * laisse un opt-out env pour les nœuds très contraints en mémoire.
+ */
+export function prefixCacheEnabled(): boolean {
+  const raw = process.env.FABI_PREFIX_CACHE?.trim().toLowerCase()
+  if (raw === undefined || raw === "") return true
+  return !(raw === "0" || raw === "false" || raw === "off" || raw === "no")
+}
+
+/**
  * Tue les workers Parallax orphelins qui pourraient avoir survécu à un
  * crash précédent de fabi (TUI freeze, kill -9 du parent sans cleanup).
  * Le `detached: true` du spawn rend ces processus indépendants ; sans
@@ -392,7 +408,11 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     "--max-num-tokens-per-batch", limits.maxNumTokensPerBatch,
     "--kv-block-size", limits.kvBlockSize,
   ]
-  log.info("worker limits resolved", { limits })
+  // `--enable-prefix-cache` est un store_true côté server_args : on ne le pousse
+  // que s'il est actif (sinon argparse n'a rien à recevoir).
+  const prefixCache = prefixCacheEnabled()
+  if (prefixCache) args.push("--enable-prefix-cache")
+  log.info("worker limits resolved", { limits, prefixCache })
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   let stopped = false
   let child: ChildProcess | null = null
