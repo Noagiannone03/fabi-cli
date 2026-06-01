@@ -10,8 +10,11 @@ import { useKeybind } from "../context/keybind"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 import { useSwarmRegistry } from "./use-swarm-registry"
+import { useToast } from "@tui/ui/toast"
 import { SWARM_PROVIDER_ID } from "@/swarm/defaults"
 import type { RegistrySwarm } from "@/swarm/registry"
+import { requestSwarmSwitch } from "@/swarm/control"
+import { getSwarmActiveState } from "@/swarm/state"
 
 // Affiche un footer compact "● 3 peers · 24GB" pour les modèles Fabi (provider
 // fabi). Si le swarm est inconnu du registry on retombe sur "● —" qui signale
@@ -34,6 +37,7 @@ export function DialogModel(props: { providerID?: string }) {
   const connected = useConnected()
   const providers = createDialogProviderOptions()
   const swarmRegistry = useSwarmRegistry()
+  const toast = useToast()
 
   const showExtra = createMemo(() => connected() && !props.providerID)
 
@@ -164,6 +168,24 @@ export function DialogModel(props: { providerID?: string }) {
 
   function onSelect(providerID: string, modelID: string) {
     local.model.set({ providerID, modelID }, { recent: true })
+    // Modèle swarm Fabi → on déplace aussi notre worker vers le swarm qui sert
+    // ce modèle (on contribue là où on consomme). L'inférence suit déjà le
+    // modèle (endpoint par-modèle) ; ici on bascule la CONTRIBUTION. Fire-and-
+    // forget : le SwarmGate réaffiche "joining" pendant la reconnexion.
+    if (providerID === SWARM_PROVIDER_ID && modelID !== getSwarmActiveState().swarmModel) {
+      const short = modelID.split("/").pop() ?? modelID
+      void requestSwarmSwitch(modelID).then((r) => {
+        if (r.ok && r.reason !== "same" && r.reason !== "no-parallax") {
+          toast.show({ variant: "info", message: `Joining the ${short} swarm…` })
+        } else if (!r.ok) {
+          const why =
+            r.reason === "not-found"
+              ? `no swarm is running ${short} right now`
+              : (r.message ?? r.reason ?? "unknown error")
+          toast.show({ variant: "error", message: `Could not switch swarm: ${why}` })
+        }
+      })
+    }
     const list = local.model.variant.list()
     const cur = local.model.variant.selected()
     if (cur === "default" || (cur && list.includes(cur))) {

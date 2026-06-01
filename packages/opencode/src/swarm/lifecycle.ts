@@ -15,7 +15,13 @@ import { checkScheduler, type SchedulerInfo } from "./scheduler"
 import { spawnWorker, type WorkerHandle, type WorkerStatus } from "./worker"
 import { tryInstallParallax, type InstallResult } from "./installer"
 import { discoverSwarm, type DiscoverResult, type RegistrySwarm } from "./registry"
-import { patchSwarmActiveState, setSwarmActiveState } from "./state"
+import { getSwarmActiveState, patchSwarmActiveState, setSwarmActiveState } from "./state"
+import { writeSwarmPreference } from "./preference"
+import {
+  planSwarmSwitch,
+  registerSwarmSwitchHandler,
+  type SwarmSwitchResult,
+} from "./control"
 
 const log = Log.create({ service: "swarm.lifecycle" })
 
@@ -118,6 +124,11 @@ export interface SwarmHandle {
 /** État global, utilisé par le finally de index.ts pour kill le worker à l'exit. */
 let active: SwarmHandle | null = null
 let signalsAttached = false
+// Dernier runtime résolu (registryUrl, flags…) — mémorisé au boot pour que le
+// hot-swap (`switchSwarm`) puisse re-discover sans re-parser env/flags.
+let lastRuntime: SwarmRuntime | null = null
+// Garde anti-concurrence : un seul switch de swarm à la fois.
+let switching = false
 
 /**
  * Attache les handlers de signaux pour cleanup le worker.
@@ -178,10 +189,76 @@ export class SwarmWorkerRequiredError extends Error {
  *
  * @param onStatus callback de status pour affichage live (UI au boot)
  */
+/**
+ * Spawn un worker Parallax et câble ses transitions de status dans le singleton
+ * `state.ts` (pour que le SwarmGate réagisse). Partagé par le boot (`startSwarm`)
+ * et le hot-swap (`switchSwarm`). Ne fait PAS l'install interactive — l'appelant
+ * décide quoi faire si le binaire manque (le boot propose l'install, le switch
+ * remonte juste l'erreur).
+ */
+async function spawnAndWire(
+  effectivePeer: string,
+  runtime: SwarmRuntime,
+  onStatus: (event: SwarmStartEvent) => void,
+  binOverride?: string,
+): Promise<{ worker: WorkerHandle | null; lastStatusKind: WorkerStatus["kind"] | null }> {
+  let lastStatusKind: WorkerStatus["kind"] | null = null
+  const w = await spawnWorker({
+    schedulerPeer: effectivePeer,
+    binOverride: binOverride ?? runtime.parallaxBin,
+    verbose: runtime.verbose,
+    onStatus: (s) => {
+      lastStatusKind = s.kind
+      onStatus({ kind: "worker", status: s })
+      switch (s.kind) {
+        case "starting":
+          patchSwarmActiveState({ phase: "starting", pid: undefined })
+          break
+        case "running":
+          patchSwarmActiveState({ phase: "running", pid: s.pid, lastError: undefined })
+          break
+        case "missing-binary":
+          patchSwarmActiveState({ phase: "missing-binary", lastError: "parallax binary not found" })
+          break
+        case "exited":
+          patchSwarmActiveState({
+            phase: "crashed",
+            pid: undefined,
+            lastError: `exit code ${s.code ?? "?"}${s.signal ? ` (signal ${s.signal})` : ""}`,
+          })
+          break
+        case "error":
+          patchSwarmActiveState({ phase: "crashed", lastError: s.message })
+          break
+      }
+    },
+  })
+  return { worker: w, lastStatusKind }
+}
+
+/** Construit un SwarmHandle dont `shutdown` est idempotent et nettoie `active`. */
+function makeHandle(worker: WorkerHandle | null, scheduler: SchedulerInfo): SwarmHandle {
+  let stopped = false
+  const handle: SwarmHandle = {
+    scheduler,
+    worker,
+    shutdown: async () => {
+      if (stopped) return
+      stopped = true
+      if (worker) await worker.stop()
+      if (active === handle) active = null
+      patchSwarmActiveState({ phase: "stopped", pid: undefined })
+    },
+  }
+  return handle
+}
+
 export async function startSwarm(
   runtime: SwarmRuntime,
   onStatus: (event: SwarmStartEvent) => void = () => {},
 ): Promise<SwarmHandle> {
+  // Mémorise le runtime pour le hot-swap (switchSwarm re-discover via celui-ci).
+  lastRuntime = runtime
   // 0. Auto-discovery via le registry (sauf si l'utilisateur a forcé un peer
   // ou désactivé le registry). On résout schedulerUrl + schedulerPeer ici ;
   // les défauts hardcodés ne servent plus que de fallback.
@@ -210,45 +287,8 @@ export async function startSwarm(
     patchSwarmActiveState({ phase: "no-parallax" })
     onStatus({ kind: "worker-disabled" })
   } else {
-    const spawn = async (binOverride?: string): Promise<{
-      worker: WorkerHandle | null
-      lastStatusKind: WorkerStatus["kind"] | null
-    }> => {
-      let lastStatusKind: WorkerStatus["kind"] | null = null
-      const w = await spawnWorker({
-        schedulerPeer: effectivePeer,
-        binOverride: binOverride ?? runtime.parallaxBin,
-        verbose: runtime.verbose,
-        onStatus: (s) => {
-          lastStatusKind = s.kind
-          onStatus({ kind: "worker", status: s })
-          // Propage dans le singleton state pour que la TUI (SwarmGate)
-          // puisse réagir en temps réel.
-          switch (s.kind) {
-            case "starting":
-              patchSwarmActiveState({ phase: "starting", pid: undefined })
-              break
-            case "running":
-              patchSwarmActiveState({ phase: "running", pid: s.pid, lastError: undefined })
-              break
-            case "missing-binary":
-              patchSwarmActiveState({ phase: "missing-binary", lastError: "parallax binary not found" })
-              break
-            case "exited":
-              patchSwarmActiveState({
-                phase: "crashed",
-                pid: undefined,
-                lastError: `exit code ${s.code ?? "?"}${s.signal ? ` (signal ${s.signal})` : ""}`,
-              })
-              break
-            case "error":
-              patchSwarmActiveState({ phase: "crashed", lastError: s.message })
-              break
-          }
-        },
-      })
-      return { worker: w, lastStatusKind }
-    }
+    const spawn = (binOverride?: string) =>
+      spawnAndWire(effectivePeer, runtime, onStatus, binOverride)
 
     // Premier essai : binaire dans le PATH ou dans l'install Fabi gérée
     let result = await spawn()
@@ -277,23 +317,103 @@ export async function startSwarm(
     }
   }
 
-  let stopped = false
-  const handle: SwarmHandle = {
-    scheduler,
-    worker,
-    shutdown: async () => {
-      if (stopped) return
-      stopped = true
-      if (worker) await worker.stop()
-      if (active === handle) active = null
-      patchSwarmActiveState({ phase: "stopped", pid: undefined })
-    },
-  }
-
+  const handle = makeHandle(worker, scheduler)
   active = handle
   attachSignalHandlers()
   return handle
 }
+
+/**
+ * Hot-swap : change le swarm sur lequel notre worker contribue, pour rejoindre
+ * celui qui sert `model`. Appelé depuis la TUI (dialog-model) via le bridge
+ * `control.requestSwarmSwitch` quand l'utilisateur choisit un autre modèle swarm.
+ *
+ * Déroulé : discover du swarm cible → stop du worker courant → reset de l'état
+ * (le SwarmGate réaffiche "joining", `use-scheduler-status` re-poll le NOUVEAU
+ * scheduler car il lit `state.schedulerUrl`) → spawn d'un worker sur le nouveau
+ * swarm → persistance de la préférence. L'inférence, elle, suit déjà le modèle
+ * choisi (chaque modèle du registry porte son propre endpoint scheduler).
+ */
+export async function switchSwarm(model: string): Promise<SwarmSwitchResult> {
+  const runtime = lastRuntime
+  if (!runtime) return { ok: false, reason: "no-runtime" }
+
+  // Mode dev sans worker : rien à déplacer, l'inférence re-route déjà via le
+  // provider. On mémorise quand même le choix.
+  if (runtime.noParallax) {
+    writeSwarmPreference({ swarmModel: model })
+    return { ok: true, reason: "no-parallax", model }
+  }
+  if (!runtime.registryUrl || runtime.skipRegistry) {
+    return { ok: false, reason: "not-found", message: "registry disabled" }
+  }
+  if (switching) {
+    return { ok: false, reason: "spawn-failed", message: "a swarm switch is already in progress" }
+  }
+  switching = true
+  try {
+    const result = await discoverSwarm({
+      registryUrl: runtime.registryUrl,
+      preferredModel: model,
+      timeoutMs: SWARM_DEFAULTS.registryTimeoutMs,
+    })
+    const plan = planSwarmSwitch(getSwarmActiveState(), result)
+    if (plan.action === "abort") {
+      return { ok: false, reason: plan.reason, message: plan.message }
+    }
+    if (plan.action === "same") {
+      return { ok: true, reason: "same", model: plan.swarm.model, swarmId: plan.swarm.id }
+    }
+
+    const swarm = plan.swarm
+    const effectivePeer = swarm.schedulerPeer ?? runtime.schedulerPeer
+    log.info("switching swarm", { from: getSwarmActiveState().swarmId, to: swarm.id, model: swarm.model })
+
+    // Stop l'ancien worker (best-effort — on ne bloque pas le switch dessus).
+    if (active?.worker) {
+      try {
+        await active.worker.stop()
+      } catch (e) {
+        log.warn("failed to stop previous worker during switch", { error: (e as Error).message })
+      }
+    }
+    active = null
+
+    // Reset COMPLET de l'état (efface workerStage/weights périmés de l'ancien
+    // swarm) et pointe sur le nouveau scheduler → le gate réaffiche "joining".
+    setSwarmActiveState({
+      phase: "starting",
+      schedulerUrl: swarm.schedulerUrl,
+      schedulerPeer: effectivePeer,
+      swarmId: swarm.id,
+      swarmModel: swarm.model,
+      registryEntry: swarm,
+    })
+
+    const scheduler = await checkScheduler(swarm.schedulerUrl, SWARM_DEFAULTS.healthcheckTimeoutMs)
+    const { worker, lastStatusKind } = await spawnAndWire(effectivePeer, runtime, () => {})
+    if (!worker) {
+      const reason = lastStatusKind === "missing-binary" ? "missing-binary" : "spawn-failed"
+      patchSwarmActiveState({
+        phase: reason === "missing-binary" ? "missing-binary" : "crashed",
+        lastError: `swarm switch failed (${reason})`,
+      })
+      return { ok: false, reason, model: swarm.model, swarmId: swarm.id }
+    }
+
+    active = makeHandle(worker, scheduler)
+    attachSignalHandlers()
+    writeSwarmPreference({ swarmModel: swarm.model, swarmId: swarm.id })
+    lastRuntime = { ...runtime, preferredModel: swarm.model, preferredSwarmId: swarm.id }
+    return { ok: true, model: swarm.model, swarmId: swarm.id }
+  } finally {
+    switching = false
+  }
+}
+
+// Enregistre le hot-swap auprès du bridge dès le chargement du module. Tant que
+// `startSwarm` n'a pas tourné, `switchSwarm` renvoie {ok:false, reason:"no-runtime"}.
+registerSwarmSwitchHandler(switchSwarm)
 
 /**
  * Arrête le swarm actif, s'il y en a un. À appeler dans le `finally`

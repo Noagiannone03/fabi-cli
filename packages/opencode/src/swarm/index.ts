@@ -33,6 +33,13 @@ export { discoverSwarm, fetchRegistrySwarms } from "./registry"
 export type { RegistrySwarm, DiscoverResult, DiscoverOptions } from "./registry"
 export { readSwarmPreference, writeSwarmPreference } from "./preference"
 export type { SwarmPreference } from "./preference"
+export { switchSwarm } from "./lifecycle"
+export {
+  requestSwarmSwitch,
+  registerSwarmSwitchHandler,
+  planSwarmSwitch,
+} from "./control"
+export type { SwarmSwitchResult, SwarmSwitchPlan } from "./control"
 export { resolvePreferredSwarm } from "./startup"
 export { planSwarmStartup, isSwarmHealthy, isSwarmUsable, sortByHealth, formatSwarmChoice } from "./startup-picker"
 export type { StartupPlan, PlanInput } from "./startup-picker"
