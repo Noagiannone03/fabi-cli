@@ -359,6 +359,33 @@ const cli = yargs(args)
       verbose: opts.swarmVerbose === true ? true : undefined,
     })
 
+    // Modèle choisi explicitement (flag ou env) → prioritaire et non négociable.
+    const explicitModel = Boolean(
+      (opts.swarmModel as string | undefined)?.trim() || process.env.FABI_SWARM_MODEL?.trim(),
+    )
+    // Sinon : dernier swarm retenu (persisté), à défaut le modèle par défaut.
+    // Vaut aussi en non-interactif (fabi run/serve). Au tout premier lancement
+    // on vise donc le défaut → connexion directe s'il est sain (zéro friction),
+    // et le sélecteur n'apparaît que si CE swarm n'a pas de peers.
+    if (!explicitModel && !runtime.preferredModel) {
+      runtime.preferredModel = Swarm.readSwarmPreference().swarmModel ?? Swarm.SWARM_DEFAULTS.model
+    }
+
+    // Sélecteur interactif (TTY only) : si le dernier swarm n'a pas de peers, on
+    // propose la liste (peers live) AVANT de rejoindre, pour ne pas coincer
+    // l'utilisateur derrière le SwarmGate. Best-effort, n'échoue jamais le boot.
+    try {
+      await Swarm.resolvePreferredSwarm(runtime, {
+        explicit: explicitModel,
+        writeLine: (msg) =>
+          process.stderr.write(
+            `${UI.Style.TEXT_INFO_BOLD}[fabi swarm]${UI.Style.TEXT_NORMAL} ${msg}${EOL}`,
+          ),
+      })
+    } catch (err) {
+      Log.Default.warn("swarm picker failed", { error: errorMessage(err) })
+    }
+
     try {
       await Swarm.startSwarm(runtime, (event) => printSwarmEvent(event, runtime))
     } catch (err) {
