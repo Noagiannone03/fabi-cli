@@ -91,10 +91,3 @@ export function planSwarmStartup(input: PlanInput): StartupPlan {
       : "several swarms are available"
   return { action: "prompt", choices, defaultIndex, reason }
 }
-
-/** Ligne d'affichage d'un choix dans le sélecteur. */
-export function formatSwarmChoice(s: RegistrySwarm): string {
-  const peers = `${s.peers} peer${s.peers === 1 ? "" : "s"}`
-  const health = isSwarmHealthy(s) ? "ready" : s.peers === 0 ? "no peers yet" : s.status
-  return `${s.model} — ${peers}, ${s.totalVramGb} GB VRAM [${health}]`
-}

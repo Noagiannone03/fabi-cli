@@ -58,6 +58,9 @@ import { useSchedulerStatus, type SchedulerStatusDetail } from "./use-scheduler-
  * On utilise `last_bootstrap_result` à la place.
  */
 export type SwarmBlockingReason =
+  /** Aucun swarm choisi : le chat est bloqué mais SANS popup gate — le picker
+   *  in-GUI (DialogSwarm) prend le relais (cf. swarm-gate.shouldShowPopup). */
+  | { kind: "awaiting-selection" }
   | { kind: "worker-not-started"; phase: SwarmWorkerPhase }
   | { kind: "worker-crashed"; lastError?: string }
   | { kind: "worker-missing-binary" }
@@ -119,6 +122,13 @@ function deriveReasons(
   schedLoading: boolean,
 ): SwarmBlockingReason[] {
   const reasons: SwarmBlockingReason[] = []
+
+  // Aucun swarm choisi → on bloque le chat (ready=false) mais on n'affiche PAS
+  // le gate : le picker in-GUI (DialogSwarm) est ouvert par app.tsx.
+  if (worker.phase === "unselected") {
+    reasons.push({ kind: "awaiting-selection" })
+    return reasons
+  }
 
   // --- Worker local ---
   // En mode --no-parallax (dev), on skip totalement le check worker — l'user

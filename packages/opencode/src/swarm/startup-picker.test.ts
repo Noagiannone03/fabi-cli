@@ -2,13 +2,7 @@
 
 import { describe, expect, test } from "bun:test"
 import type { RegistrySwarm } from "./registry"
-import {
-  formatSwarmChoice,
-  isSwarmHealthy,
-  isSwarmUsable,
-  planSwarmStartup,
-  sortByHealth,
-} from "./startup-picker"
+import { isSwarmHealthy, isSwarmUsable, planSwarmStartup, sortByHealth } from "./startup-picker"
 
 const swarm = (over: Partial<RegistrySwarm>): RegistrySwarm => ({
   id: "s",
@@ -121,17 +115,11 @@ describe("planSwarmStartup", () => {
   })
 })
 
-describe("sortByHealth / formatSwarmChoice", () => {
+describe("sortByHealth", () => {
   test("healthy first then peers desc", () => {
     const dead = swarm({ id: "d", peers: 0 })
     const small = swarm({ id: "s", peers: 1 })
     const big = swarm({ id: "b", peers: 8 })
     expect(sortByHealth([dead, small, big]).map((s) => s.id)).toEqual(["b", "s", "d"])
-  })
-  test("format shows model, peers and a health label", () => {
-    expect(formatSwarmChoice(swarm({ peers: 3 }))).toContain("3 peers")
-    expect(formatSwarmChoice(swarm({ peers: 3 }))).toContain("ready")
-    expect(formatSwarmChoice(swarm({ peers: 0 }))).toContain("no peers yet")
-    expect(formatSwarmChoice(swarm({ peers: 1 }))).toContain("1 peer")
   })
 })

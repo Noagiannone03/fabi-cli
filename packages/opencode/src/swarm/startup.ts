@@ -1,39 +1,49 @@
-// Sélecteur de swarm au lancement (phase boot, avant la TUI).
+// Résolution du swarm au lancement (phase boot, avant la TUI).
 //
-// Branché depuis le middleware swarm de `index.ts`. Résout le swarm cible AVANT
-// le `join`, de sorte que l'utilisateur ne se retrouve jamais coincé derrière le
-// SwarmGate sur un swarm sans peers (il choisit en voyant les peers live).
+// Branché depuis le middleware swarm de `index.ts`. On décide AVANT de rejoindre
+// si on connecte direct (dernier modèle sain → zéro friction) ou si on défère le
+// choix à un picker DANS la GUI (DialogSwarm). Plus de prompt texte pré-GUI :
+// quand il faut choisir, on passe en phase "unselected" et la TUI ouvre le picker.
 //
 // 100% best-effort : pas de TTY, registry injoignable, ou la moindre erreur →
-// on ne touche pas au runtime et on laisse `startSwarm` faire sa résolution
-// habituelle (avec fallback). Ne doit JAMAIS bloquer le boot.
+// on demande à rejoindre normalement (startSwarm fera sa résolution + fallback).
+// Ne doit JAMAIS bloquer le boot.
 
-import * as UI from "../cli/ui"
 import { SWARM_DEFAULTS } from "./defaults"
-import type { SwarmRuntime } from "./lifecycle"
-import { readSwarmPreference, writeSwarmPreference } from "./preference"
+import { armSwarmRuntime, type SwarmRuntime } from "./lifecycle"
+import { writeSwarmPreference } from "./preference"
 import { fetchRegistrySwarms, type RegistrySwarm } from "./registry"
-import { formatSwarmChoice, planSwarmStartup } from "./startup-picker"
+import { setSwarmActiveState } from "./state"
+import { planSwarmStartup } from "./startup-picker"
 
-export interface ResolvePreferredOptions {
+export interface ResolveStartupOptions {
   /** L'utilisateur a forcé le modèle via --swarm-model / FABI_SWARM_MODEL. */
   explicit: boolean
-  /** Sink d'affichage (mêmes lignes "[fabi swarm]" que le reste du boot). */
-  writeLine: (msg: string) => void
+}
+
+export interface StartupDecision {
+  /** true → l'appelant doit appeler `startSwarm` (on rejoint un swarm). */
+  join: boolean
 }
 
 /**
- * Résout le swarm préféré et l'écrit dans `runtime` (preferredSwarmId +
- * preferredModel), en demandant à l'utilisateur si le dernier choix n'est pas
- * exploitable. Persiste le choix retenu. Mute `runtime` en place.
+ * Décide quoi faire au lancement et prépare le `runtime` en conséquence.
+ *
+ * - swarm du dernier modèle (ou défaut) sain → `{join:true}` après avoir fixé
+ *   `runtime.preferredSwarmId/Model` (connexion directe).
+ * - sinon, en TTY → on **défère à la GUI** : arme le runtime pour le hot-swap,
+ *   passe l'état en "unselected" (la TUI ouvre DialogSwarm) et renvoie `{join:false}`.
+ * - en non-interactif (run/serve) ou registry KO → `{join:true}` (fallback).
  */
-export async function resolvePreferredSwarm(
+export async function resolveStartupSwarm(
   runtime: SwarmRuntime,
-  opts: ResolvePreferredOptions,
-): Promise<void> {
-  // Pas d'interaction possible / pas de registry → on ne fait rien.
-  if (!process.stdin.isTTY) return
-  if (runtime.skipRegistry || !runtime.registryUrl) return
+  opts: ResolveStartupOptions,
+): Promise<StartupDecision> {
+  // Choix explicite, registry désactivé, ou pas de registry → on rejoint
+  // directement (startSwarm résout + fallback).
+  if (opts.explicit || runtime.skipRegistry || !runtime.registryUrl) {
+    return { join: true }
+  }
 
   let swarms: RegistrySwarm[]
   try {
@@ -41,64 +51,33 @@ export async function resolvePreferredSwarm(
       timeoutMs: SWARM_DEFAULTS.registryTimeoutMs,
     })
   } catch {
-    return // registry KO → startSwarm gérera le fallback
+    return { join: true } // registry KO → startSwarm gérera le fallback
   }
 
-  const plan = planSwarmStartup({
-    swarms,
-    rememberedModel: runtime.preferredModel,
-    explicitPreference: opts.explicit,
-  })
+  const plan = planSwarmStartup({ swarms, rememberedModel: runtime.preferredModel })
 
-  if (plan.action === "none") return
-
-  let chosen: RegistrySwarm
   if (plan.action === "auto") {
-    chosen = plan.swarm
-  } else {
-    chosen = await promptSwarmChoice(plan.choices, plan.defaultIndex, plan.reason, opts.writeLine)
+    runtime.preferredSwarmId = plan.swarm.id
+    runtime.preferredModel = plan.swarm.model
+    writeSwarmPreference({ swarmModel: plan.swarm.model, swarmId: plan.swarm.id })
+    return { join: true }
   }
 
-  runtime.preferredSwarmId = chosen.id
-  runtime.preferredModel = chosen.model
-  writeSwarmPreference({ swarmModel: chosen.model, swarmId: chosen.id })
-}
-
-/**
- * Affiche la liste numérotée (peers live) et lit le choix. Entrée vide →
- * `defaultIndex`. Saisie invalide → on redemande (3 essais) puis on prend le
- * défaut. Toute erreur de lecture → défaut.
- */
-async function promptSwarmChoice(
-  choices: RegistrySwarm[],
-  defaultIndex: number,
-  reason: string,
-  writeLine: (msg: string) => void,
-): Promise<RegistrySwarm> {
-  const dim = UI.Style.TEXT_DIM
-  const reset = UI.Style.TEXT_NORMAL
-  const bold = UI.Style.TEXT_INFO_BOLD
-
-  writeLine(`${bold}choose a swarm${reset} — ${reason}`)
-  choices.forEach((s, i) => {
-    const marker = i === defaultIndex ? "›" : " "
-    writeLine(`  ${marker} ${i + 1}. ${formatSwarmChoice(s)}`)
-  })
-  writeLine(`${dim}press Enter for #${defaultIndex + 1}, or type a number${reset}`)
-
-  for (let attempt = 0; attempt < 3; attempt++) {
-    let answer: string
-    try {
-      answer = (await UI.input("swarm > ")).trim()
-    } catch {
-      return choices[defaultIndex]!
-    }
-    if (answer === "") return choices[defaultIndex]!
-    const n = Number.parseInt(answer, 10)
-    if (Number.isInteger(n) && n >= 1 && n <= choices.length) {
-      return choices[n - 1]!
-    }
-    writeLine(`${dim}invalid choice — enter 1-${choices.length}${reset}`)
+  if (plan.action === "none") {
+    return { join: true } // rien d'exploitable → laisse le fallback existant
   }
-  return choices[defaultIndex]!
+
+  // plan.action === "prompt"
+  if (!process.stdin.isTTY) {
+    // Non-interactif : pas de picker → on prend le plus sain (tête de liste triée).
+    const best = plan.choices[0]!
+    runtime.preferredSwarmId = best.id
+    runtime.preferredModel = best.model
+    return { join: true }
+  }
+
+  // Interactif → on défère le choix au picker in-GUI (DialogSwarm).
+  armSwarmRuntime(runtime)
+  setSwarmActiveState({ phase: "unselected" })
+  return { join: false }
 }

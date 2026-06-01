@@ -46,6 +46,7 @@ import { useArgs } from "@tui/context/args"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { WorkspaceLabel, type WorkspaceStatus } from "../workspace-label"
 import { useSwarmState } from "../use-swarm-state"
+import { SWARM_PROVIDER_ID } from "@/swarm/defaults"
 import { ChatLoadingIndicator } from "../chat-loading-indicator"
 
 export type PromptProps = {
@@ -830,6 +831,18 @@ export function Prompt(props: PromptProps) {
     const selectedModel = local.model.current()
     if (!selectedModel) {
       void promptModelWarning()
+      return false
+    }
+    // Modèle Fabi mais swarm pas encore prêt (aucun modèle choisi, worker en
+    // cours de join, peers insuffisants…) → on bloque l'envoi pour éviter un
+    // 503/timeout. On peut toujours changer de modèle (gate/picker accessibles).
+    if (selectedModel.providerID === SWARM_PROVIDER_ID && !swarmState().ready) {
+      toast.show({
+        variant: "warning",
+        message: swarmWaitingForPeers()
+          ? "Swarm is waiting for more peers — try another model or hold on."
+          : "Swarm not ready yet — pick a model that has peers, or wait a moment.",
+      })
       return false
     }
 
@@ -1731,6 +1744,17 @@ export function Prompt(props: PromptProps) {
                   </Switch>
                   <text fg={theme.text}>
                     {keybind.print("command_list")} <span style={{ fg: theme.textMuted }}>commands</span>
+                  </text>
+                  {/* Modèle/swarm courant toujours visible + comment en changer. */}
+                  <text fg={theme.text} wrapMode="none">
+                    {keybind.print("model_list")}{" "}
+                    <span style={{ fg: theme.textMuted }}>
+                      {swarmState().model
+                        ? `${swarmState().model!.split("/").pop()}${
+                            swarmState().nodesTotal > 0 ? ` ● ${swarmState().nodesAvailable}` : ""
+                          }`
+                        : "model"}
+                    </span>
                   </text>
                 </Match>
                 <Match when={store.mode === "shell"}>

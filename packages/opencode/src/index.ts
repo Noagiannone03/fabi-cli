@@ -371,20 +371,18 @@ const cli = yargs(args)
       runtime.preferredModel = Swarm.readSwarmPreference().swarmModel ?? Swarm.SWARM_DEFAULTS.model
     }
 
-    // Sélecteur interactif (TTY only) : si le dernier swarm n'a pas de peers, on
-    // propose la liste (peers live) AVANT de rejoindre, pour ne pas coincer
-    // l'utilisateur derrière le SwarmGate. Best-effort, n'échoue jamais le boot.
+    // Résout le swarm cible AVANT de rejoindre. Si le dernier modèle (ou le
+    // défaut) a un swarm sain → on rejoint direct. Sinon, en interactif, on
+    // défère le choix au picker DANS la GUI (phase "unselected" → DialogSwarm) :
+    // plus de prompt texte avant la TUI, et on ne coince jamais l'utilisateur.
+    let shouldJoin = true
     try {
-      await Swarm.resolvePreferredSwarm(runtime, {
-        explicit: explicitModel,
-        writeLine: (msg) =>
-          process.stderr.write(
-            `${UI.Style.TEXT_INFO_BOLD}[fabi swarm]${UI.Style.TEXT_NORMAL} ${msg}${EOL}`,
-          ),
-      })
+      const decision = await Swarm.resolveStartupSwarm(runtime, { explicit: explicitModel })
+      shouldJoin = decision.join
     } catch (err) {
-      Log.Default.warn("swarm picker failed", { error: errorMessage(err) })
+      Log.Default.warn("swarm startup resolve failed", { error: errorMessage(err) })
     }
+    if (!shouldJoin) return // worker rejoint plus tard via le picker (switchSwarm)
 
     try {
       await Swarm.startSwarm(runtime, (event) => printSwarmEvent(event, runtime))

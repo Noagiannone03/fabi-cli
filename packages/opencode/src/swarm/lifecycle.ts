@@ -411,8 +411,20 @@ export async function switchSwarm(model: string): Promise<SwarmSwitchResult> {
   }
 }
 
+/**
+ * Arme le runtime pour le hot-swap SANS spawner de worker. Utilisé quand le boot
+ * défère le choix du swarm à la TUI (phase "unselected") : `switchSwarm` pourra
+ * alors rejoindre le swarm choisi par l'utilisateur, sans qu'on ait rejoint
+ * quoi que ce soit au démarrage.
+ */
+export function armSwarmRuntime(runtime: SwarmRuntime): void {
+  lastRuntime = runtime
+  attachSignalHandlers()
+}
+
 // Enregistre le hot-swap auprès du bridge dès le chargement du module. Tant que
-// `startSwarm` n'a pas tourné, `switchSwarm` renvoie {ok:false, reason:"no-runtime"}.
+// `startSwarm`/`armSwarmRuntime` n'a pas tourné, `switchSwarm` renvoie
+// {ok:false, reason:"no-runtime"}.
 registerSwarmSwitchHandler(switchSwarm)
 
 /**

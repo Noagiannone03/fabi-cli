@@ -33,6 +33,8 @@ import { SyncProvider, useSync } from "@tui/context/sync"
 import { SyncProviderV2 } from "@tui/context/sync-v2"
 import { LocalProvider, useLocal } from "@tui/context/local"
 import { DialogModel } from "@tui/component/dialog-model"
+import { DialogSwarm } from "@tui/component/dialog-swarm"
+import { useSwarmState } from "@tui/component/use-swarm-state"
 import { useConnected } from "@tui/component/use-connected"
 import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
@@ -264,6 +266,24 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     renderer,
   })
   const [ready, setReady] = createSignal(false)
+
+  // Picker de swarm in-GUI : si le boot n'a rejoint aucun swarm (phase
+  // "unselected"), on ouvre DialogSwarm dès que la TUI est prête. L'utilisateur
+  // choisit son modèle DANS l'interface (plus de prompt texte avant la GUI).
+  const swarmState = useSwarmState()
+  let swarmPickerOpened = false
+  createEffect(() => {
+    const phase = swarmState().workerPhase
+    if (phase !== "unselected") {
+      swarmPickerOpened = false // réarme pour une éventuelle future déselection
+      return
+    }
+    if (ready() && dialog.stack.length === 0 && !swarmPickerOpened) {
+      swarmPickerOpened = true
+      dialog.replace(() => <DialogSwarm />)
+    }
+  })
+
   TuiPluginRuntime.init({
     api,
     config: tuiConfig,
@@ -467,7 +487,9 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         name: "models",
       },
       onSelect: () => {
-        dialog.replace(() => <DialogModel />)
+        // Picker swarm Fabi (peers/VRAM, hot-swap). `<leader>p` y bascule vers
+        // la liste complète des providers (DialogModel) pour les avancés.
+        dialog.replace(() => <DialogSwarm />)
       },
     },
     {

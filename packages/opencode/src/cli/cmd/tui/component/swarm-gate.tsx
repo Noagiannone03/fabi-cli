@@ -4,9 +4,11 @@
 //   - Le Dialog stack du TUI est dismissible (ESC / Ctrl+C → clear). On ne
 //     veut PAS que l'utilisateur puisse fermer ce popup à la main : tant que
 //     le swarm n'est pas prêt, envoyer un chat finit en 503.
-//   - Le zIndex 4000 le pose au-dessus du Dialog stack (3000) ET du prompt
-//     input : impossible de cliquer dessous ou de taper dans le prompt
-//     pendant que ce gate est visible.
+//   - Le zIndex 2900 le pose au-dessus du prompt input (chat bloqué : on ne
+//     peut pas taper dessous) MAIS sous le Dialog stack (3000) : on peut donc
+//     ouvrir le picker de modèle (DialogSwarm) PAR-DESSUS le gate pour changer
+//     de swarm sans être coincé. Le blocage réel du chat tient à `ready=false`
+//     (use-swarm-state), pas qu'à la couverture visuelle.
 //
 // **Exceptions inline (pas de popup, message dans le prompt) :**
 //   - "need-more-peers" : sous le seuil opérateur, on attend que des amis
@@ -21,6 +23,7 @@ import { For, Show, createMemo } from "solid-js"
 import { RGBA, TextAttributes } from "@opentui/core"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "@tui/context/theme"
+import { useKeybind } from "@tui/context/keybind"
 import { Spinner } from "./spinner"
 import { useSwarmState, type SwarmBlockingReason } from "./use-swarm-state"
 import { formatElapsed, useAnimatedDots, useElapsedSeconds } from "./cycling-text"
@@ -100,7 +103,12 @@ function describeRealActivity(state: SwarmStateDetail): string {
 function shouldShowPopup(reasons: SwarmBlockingReason[]): boolean {
   if (reasons.length === 0) return false
   return !reasons.every(
-    (r) => r.kind === "need-more-peers" || r.kind === "insufficient-capacity",
+    (r) =>
+      r.kind === "need-more-peers" ||
+      r.kind === "insufficient-capacity" ||
+      // "awaiting-selection" → c'est le picker in-GUI (DialogSwarm) qui s'affiche,
+      // pas le gate. On bloque juste le chat (ready=false), sans popup.
+      r.kind === "awaiting-selection",
   )
 }
 
@@ -179,6 +187,7 @@ export function SwarmGate() {
   const { theme } = useTheme()
   const dimensions = useTerminalDimensions()
   const state = useSwarmState()
+  const keybind = useKeybind()
 
   const visible = createMemo(() => shouldShowPopup(state().reasons))
   const headline = createMemo(() => pickHeadline(state().reasons))
@@ -210,7 +219,7 @@ export function SwarmGate() {
         width={dimensions().width}
         height={dimensions().height}
         position="absolute"
-        zIndex={4000}
+        zIndex={2900}
         top={0}
         left={0}
         alignItems="center"
@@ -315,6 +324,14 @@ export function SwarmGate() {
               fabi.
             </text>
           </Show>
+
+          {/* Échappatoire : on n'est jamais coincé sur ce swarm — on peut
+              toujours ouvrir le picker pour rejoindre un autre modèle. */}
+          <text> </text>
+          <text fg={theme.textMuted}>
+            {keybind.print("model_list")}{" "}
+            <span style={{ fg: theme.text }}>change model / swarm</span>
+          </text>
         </box>
       </box>
     </Show>

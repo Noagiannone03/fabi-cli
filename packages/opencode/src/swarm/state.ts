@@ -23,6 +23,7 @@ import type { RegistrySwarm } from "./registry"
  */
 export type SwarmWorkerPhase =
   | "idle"
+  | "unselected" // aucun swarm rejoint : on attend que l'user choisisse un modèle (picker in-GUI)
   | "starting"
   | "running"
   | "stopped"
