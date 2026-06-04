@@ -166,22 +166,28 @@ const targets = singleFlag
 
 await $`rm -rf dist`
 
+// User-facing product/binary name. The npm package internals stay "opencode"
+// (see pkg.name), but the shipped CLI binary and the release archives are named
+// after the product so `fabi` is the command users actually run.
+const PRODUCT = "fabi"
+
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
   await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
   await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
 }
 for (const item of targets) {
-  const name = [
-    pkg.name,
+  // Suffix shared by the dist folder / archive name and the bun --compile target,
+  // so they can never drift apart (the bun target is just "bun-<suffix>").
+  const suffix = [
     // changing to win32 flags npm for some reason
     item.os === "win32" ? "windows" : item.os,
     item.arch,
     item.avx2 === false ? "baseline" : undefined,
     item.abi === undefined ? undefined : item.abi,
-  ]
-    .filter(Boolean)
-    .join("-")
+  ].filter(Boolean)
+  const name = [PRODUCT, ...suffix].join("-")
+  const bunTarget = ["bun", ...suffix].join("-")
   console.log(`building ${name}`)
   await $`mkdir -p dist/${name}/bin`
 
@@ -208,8 +214,8 @@ for (const item of targets) {
       autoloadDotenv: false,
       autoloadTsconfig: true,
       autoloadPackageJson: true,
-      target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencode`,
+      target: bunTarget as any,
+      outfile: `dist/${name}/bin/${PRODUCT}`,
       execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
@@ -227,7 +233,7 @@ for (const item of targets) {
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
-    const binaryPath = `dist/${name}/bin/opencode`
+    const binaryPath = `dist/${name}/bin/${PRODUCT}`
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()

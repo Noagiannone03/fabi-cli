@@ -1,0 +1,83 @@
+name: release
+run-name: "release ${{ inputs.version || github.ref_name }}"
+
+# Clean, self-contained release pipeline for the Fabi CLI.
+#
+# Unlike publish.yml (inherited from opencode, still wired to npm `opencode-ai`,
+# ghcr `anomalyco`, the AUR and a Homebrew tap), this workflow only does what the
+# curl-based installer needs: build the `fabi` binaries for every target and
+# attach them to a GitHub Release. Nothing is published to any external registry.
+#
+# Trigger it either by pushing a tag `vX.Y.Z`, or manually from the Actions tab
+# with an explicit version.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.0)"
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+concurrency: ${{ github.workflow }}-${{ inputs.version || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: github.repository == 'Noagiannone03/fabi-cli'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          version="${version#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$tag" \
+              --generate-notes \
+              --draft
+          fi
+
+      - name: Build CLI binaries
+        run: ./packages/opencode/script/build.ts
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+          OPENCODE_RELEASE: "1"
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+          echo "Released $tag with assets:"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
