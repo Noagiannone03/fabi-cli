@@ -9,6 +9,7 @@ import { existsSync } from "node:fs"
 import { homedir, totalmem } from "node:os"
 import { join } from "node:path"
 import * as Log from "@opencode-ai/core/util/log"
+import { getAccountToken } from "./account-token"
 import { SWARM_DEFAULTS } from "./defaults"
 import { FabiEventStream } from "./events"
 import { inspectManagedSource } from "./installer"
@@ -183,6 +184,11 @@ function buildWorkerEnv(): NodeJS.ProcessEnv {
   const setIfUnset = (key: string, value: string) => {
     if (!env[key]?.trim()) env[key] = value
   }
+
+  // Jeton de compte pour la porte de contribution : contribuer avec ce compte
+  // débloque la consommation (« tu contribues = tu consommes »). Même fichier
+  // que l'apiKey du provider → un seul compte CLI+IDE.
+  setIfUnset("FABI_ACCOUNT_TOKEN", getAccountToken())
 
   if (hw.accelerator === "apple-silicon" && hw.ramGb < 64) {
     // Réserve RAM système pour ne pas évincer l'OS sur mémoire unifiée.

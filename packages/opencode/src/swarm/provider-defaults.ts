@@ -9,6 +9,7 @@
 //   - désactiver Fabi (`disabled_providers: ["fabi"]`)
 //   - ajouter d'autres providers sans casser celui-ci
 
+import { getAccountToken } from "./account-token"
 import { SWARM_DEFAULTS, SWARM_PROVIDER_ID } from "./defaults"
 
 export interface SwarmProviderOverrides {
@@ -34,8 +35,10 @@ export function buildSwarmProvider(overrides: SwarmProviderOverrides = {}) {
     npm: "@ai-sdk/openai-compatible",
     api: `${schedulerUrl}/v1`,
     options: {
-      // Le scheduler accepte l'auth ouverte ; le SDK exige une valeur non-vide.
-      apiKey: "fabi-no-auth",
+      // Jeton de compte = apiKey : la porte de contribution n'autorise la
+      // consommation que si ce compte a un worker actif. Même jeton que celui
+      // passé au worker (cf. account-token.ts) → « tu contribues = tu consommes ».
+      apiKey: getAccountToken(),
       timeout: SWARM_DEFAULTS.inferenceTimeoutMs,
       chunkTimeout: SWARM_DEFAULTS.inferenceChunkTimeoutMs,
     },
