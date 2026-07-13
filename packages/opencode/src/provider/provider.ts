@@ -44,6 +44,9 @@ function inferSwarmFamily(modelID: string): string {
 
 function buildSwarmConfigModel(swarm: RegistrySwarm) {
   const modelID = swarm.model.trim()
+  const context = swarm.maxContextTokens && swarm.maxContextTokens > 0
+    ? swarm.maxContextTokens
+    : 65536
   return {
     id: modelID,
     name: (modelID.split("/").pop() ?? modelID) + " via " + swarm.name,
@@ -52,7 +55,7 @@ function buildSwarmConfigModel(swarm: RegistrySwarm) {
     reasoning: false,
     temperature: true,
     modalities: { input: ["text"], output: ["text"] },
-    limit: { context: 32768, output: 8192 },
+    limit: { context, output: Math.min(8192, context) },
     provider: {
       npm: "@ai-sdk/openai-compatible",
       api: swarm.schedulerUrl.replace(/\/+$/, "") + "/v1",

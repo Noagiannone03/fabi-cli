@@ -29,6 +29,8 @@ export interface RegistrySwarm {
   schedulerStatus: string | null
   peers: number
   totalVramGb: number
+  /** Fenêtre de contexte maximale d'une route complète, à swarm idle. */
+  maxContextTokens?: number
   lastSeen: string
   containerName?: string
 }
