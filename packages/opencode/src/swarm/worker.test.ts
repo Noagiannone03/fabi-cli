@@ -1,7 +1,7 @@
 // Tests sur le tiering mémoire des limites worker (fonction pure, sans hardware).
 
 import { afterEach, describe, expect, test } from "bun:test"
-import { prefixCacheEnabled, resolveWorkerLimits, type HardwareProfile } from "./worker"
+import { gpuBackendArgs, prefixCacheEnabled, resolveWorkerLimits, type HardwareProfile } from "./worker"
 
 const DEFAULTS = {
   maxBatchSize: "2",
@@ -87,5 +87,16 @@ describe("prefixCacheEnabled — opt-out env", () => {
   test.each(["1", "true", "on", "yes"])("activé par %p", (v) => {
     process.env.FABI_PREFIX_CACHE = v
     expect(prefixCacheEnabled()).toBe(true)
+  })
+})
+
+describe("gpuBackendArgs — platform runtime contract", () => {
+  test("selects the bundled vLLM runtime on native Windows", () => {
+    expect(gpuBackendArgs("win32")).toEqual(["--gpu-backend", "vllm"])
+  })
+
+  test("keeps the platform default on Unix workers", () => {
+    expect(gpuBackendArgs("darwin")).toEqual([])
+    expect(gpuBackendArgs("linux")).toEqual([])
   })
 })

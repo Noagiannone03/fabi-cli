@@ -229,6 +229,14 @@ export function prefixCacheEnabled(): boolean {
   return !(raw === "0" || raw === "false" || raw === "off" || raw === "no")
 }
 
+/** Select the GPU runtime that is actually bundled for the host platform. */
+export function gpuBackendArgs(platform: NodeJS.Platform = process.platform): string[] {
+  // The native Windows runtime ships vLLM-Windows; SGLang is not supported by
+  // that package. Keep the choice explicit so Parallax never falls back to its
+  // Linux-oriented default on Windows.
+  return platform === "win32" ? ["--gpu-backend", "vllm"] : []
+}
+
 /**
  * Tue les workers Parallax orphelins qui pourraient avoir survécu à un
  * crash précédent de fabi (TUI freeze, kill -9 du parent sans cleanup).
@@ -425,7 +433,8 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
   // que s'il est actif (sinon argparse n'a rien à recevoir).
   const prefixCache = prefixCacheEnabled()
   if (prefixCache) args.push("--enable-prefix-cache")
-  log.info("worker limits resolved", { limits, prefixCache })
+  args.push(...gpuBackendArgs())
+  log.info("worker limits resolved", { limits, prefixCache, gpuBackend: process.platform === "win32" ? "vllm" : "default" })
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   let stopped = false
   let child: ChildProcess | null = null
