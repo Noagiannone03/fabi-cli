@@ -229,6 +229,11 @@ export function prefixCacheEnabled(): boolean {
   return !(raw === "0" || raw === "false" || raw === "off" || raw === "no")
 }
 
+/** Parallax enables prefix caching by default; only pass its explicit opt-out. */
+export function prefixCacheArgs(enabled = prefixCacheEnabled()): string[] {
+  return enabled ? [] : ["--disable-prefix-cache"]
+}
+
 /** Select the GPU runtime that is actually bundled for the host platform. */
 export function gpuBackendArgs(platform: NodeJS.Platform = process.platform): string[] {
   // The native Windows runtime ships vLLM-Windows; SGLang is not supported by
@@ -429,10 +434,8 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     "--max-num-tokens-per-batch", limits.maxNumTokensPerBatch,
     "--kv-block-size", limits.kvBlockSize,
   ]
-  // `--enable-prefix-cache` est un store_true côté server_args : on ne le pousse
-  // que s'il est actif (sinon argparse n'a rien à recevoir).
   const prefixCache = prefixCacheEnabled()
-  if (prefixCache) args.push("--enable-prefix-cache")
+  args.push(...prefixCacheArgs(prefixCache))
   args.push(...gpuBackendArgs())
   log.info("worker limits resolved", { limits, prefixCache, gpuBackend: process.platform === "win32" ? "vllm" : "default" })
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
