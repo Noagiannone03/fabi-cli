@@ -13,14 +13,14 @@
 //   1. venv bundlé dans le tarball Fabi (runtime/parallax-venv/) — court-circuit total
 //   2. env FABI_PARALLAX_SOURCE  (override explicite, accepte path local OU URL git)
 //   3. clone local du fork swarm-engine si dispo (= dev local du méta-projet)
-//   4. git clone Noagiannone03/swarm-engine (notre fork patché de Parallax)
+//   4. checkout du commit qualifié de Noagiannone03/swarm-engine
 //      dans ~/.local/share/fabi/runtime/parallax-src/ puis pip install -e .
 //      IMPORTANT : on passe par un clone + editable car le pyproject.toml
 //      upstream a un build-backend poetry-core qui ignore les sous-packages
 //      en mode wheel (`pip install git+https://`). Le mode editable expose
 //      le source dir via .pth → tous les sous-packages visibles.
-//      Le fork swarm-engine contient les fixes Fabi (heartbeat configurable,
-//      détection mémoire utilisable, bootstrap cohérent, need_more_nodes…).
+//      Le SHA immuable évite qu'une branche mutable change le runtime après
+//      qualification sans nouvelle version du CLI.
 
 import { spawn } from "node:child_process"
 import { existsSync, mkdirSync } from "node:fs"
@@ -154,16 +154,41 @@ interface SourceInfo {
   localPath: string
   /** URL git si on doit cloner (sinon undefined = path déjà prêt). */
   cloneUrl?: string
-  /** Branche/tag/commit à checkout (passé à `git clone --branch`). */
+  /** Branche, tag ou commit à checkout. */
   cloneRef?: string
   /** Description user-friendly pour le prompt. */
   display: string
 }
 
-// Fork Fabi de Parallax. Branche `fabi-patches` = upstream main + nos commits
-// (heartbeat configurable, détection mémoire utilisable, bootstrap cohérent…).
 const FORK_PARALLAX_GIT = "https://github.com/Noagiannone03/swarm-engine.git"
-const FORK_PARALLAX_REF = "fabi-patches"
+export const QUALIFIED_PARALLAX_COMMIT = "be90732e93e0de67a04de0827e37800050d0b900"
+
+function isCommitSha(ref: string | null | undefined): ref is string {
+  return !!ref && /^[0-9a-f]{40}$/i.test(ref)
+}
+
+/**
+ * Build the exact Git operations used for a cold managed checkout.
+ *
+ * `git clone --branch <sha>` does not accept commit SHAs. For immutable
+ * runtime pins, initialise an empty repository and fetch only the qualified
+ * reachable commit. Branch/tag overrides keep the ordinary shallow clone.
+ */
+export function managedCloneArgs(source: Pick<SourceInfo, "localPath" | "cloneUrl" | "cloneRef">): string[][] {
+  if (!source.cloneUrl) return []
+  if (isCommitSha(source.cloneRef)) {
+    return [
+      ["init", source.localPath],
+      ["-C", source.localPath, "remote", "add", "origin", source.cloneUrl],
+      ["-C", source.localPath, "fetch", "--depth=1", "origin", source.cloneRef],
+      ["-C", source.localPath, "checkout", "--detach", "FETCH_HEAD"],
+    ]
+  }
+  const args = ["clone", "--depth=1"]
+  if (source.cloneRef) args.push("--branch", source.cloneRef)
+  args.push(source.cloneUrl, source.localPath)
+  return [args]
+}
 
 function resolveSource(): SourceInfo {
   // 1. Override explicite via env (path local OU URL git)
@@ -198,8 +223,8 @@ function resolveSource(): SourceInfo {
   // Le mode editable contourne le bug de packaging upstream (pyproject.toml
   // poetry-core ignore les sous-packages parallax_utils, scheduling,
   // parallax_extensions en mode wheel).
-  // FABI_PARALLAX_REF peut overrider la branche pinnée.
-  const cloneRef = process.env.FABI_PARALLAX_REF?.trim() || FORK_PARALLAX_REF
+  // FABI_PARALLAX_REF peut overrider le commit qualifié.
+  const cloneRef = process.env.FABI_PARALLAX_REF?.trim() || QUALIFIED_PARALLAX_COMMIT
   return {
     localPath: join(installRoot(), "parallax-src"),
     cloneUrl: FORK_PARALLAX_GIT,
@@ -233,13 +258,19 @@ async function shaShort(repoPath: string): Promise<string | null> {
   return r.stdout.trim() || null
 }
 
+async function matchesCommit(repoPath: string, ref: string | undefined): Promise<boolean> {
+  if (!isCommitSha(ref)) return true
+  const current = await captureCmd("git", ["-C", repoPath, "rev-parse", "HEAD"])
+  return current.exitCode === 0 && current.stdout.trim().toLowerCase() === ref.toLowerCase()
+}
+
 /**
  * Met à jour le clone géré du fork swarm-engine si on est derrière le remote.
  * Ne fait rien si la source vient d'un override `FABI_PARALLAX_SOURCE` local
  * (= clone de dev), ou si ce n'est pas un git clone.
  *
- * Best-effort : un échec réseau ou un git pull qui foire ne bloque pas le
- * lancement de fabi — l'utilisateur garde sa version actuelle.
+ * Les overrides de branche restent best-effort. Le commit produit qualifie,
+ * lui, doit être atteint exactement avant de lancer le worker.
  */
 async function refreshSourceClone(): Promise<SourceRefresh> {
   const source = resolveSource()
@@ -248,9 +279,7 @@ async function refreshSourceClone(): Promise<SourceRefresh> {
     return {
       localPath: source.localPath,
       expectedRef: null,
-      beforeSha: existsSync(join(source.localPath, ".git"))
-        ? await shaShort(source.localPath)
-        : null,
+      beforeSha: existsSync(join(source.localPath, ".git")) ? await shaShort(source.localPath) : null,
       afterSha: null,
       updated: false,
       skipReason: "source-is-local-checkout",
@@ -269,6 +298,38 @@ async function refreshSourceClone(): Promise<SourceRefresh> {
   }
 
   const beforeSha = await shaShort(source.localPath)
+  if (isCommitSha(source.cloneRef)) {
+    if (await matchesCommit(source.localPath, source.cloneRef)) {
+      return {
+        localPath: source.localPath,
+        expectedRef: source.cloneRef,
+        beforeSha,
+        afterSha: beforeSha,
+        updated: false,
+      }
+    }
+    const fetch = await captureCmd("git", ["-C", source.localPath, "fetch", "--depth=1", "origin", source.cloneRef])
+    if (fetch.exitCode !== 0) {
+      return {
+        localPath: source.localPath,
+        expectedRef: source.cloneRef,
+        beforeSha,
+        afterSha: null,
+        updated: false,
+        skipReason: `git-fetch-failed (${fetch.stderr.trim().slice(0, 120)})`,
+      }
+    }
+    const checkout = await captureCmd("git", ["-C", source.localPath, "checkout", "--detach", source.cloneRef])
+    const afterSha = await shaShort(source.localPath)
+    return {
+      localPath: source.localPath,
+      expectedRef: source.cloneRef,
+      beforeSha,
+      afterSha,
+      updated: checkout.exitCode === 0 && !!beforeSha && !!afterSha && beforeSha !== afterSha,
+      skipReason: checkout.exitCode === 0 ? undefined : `git-checkout-failed (${checkout.stderr.trim().slice(0, 120)})`,
+    }
+  }
   // Le clone a été initialisé via `git clone --branch <ref>` donc la branche
   // courante suit déjà `origin/<ref>`. `git pull --ff-only --quiet` sans
   // args additionnels respecte ce tracking, et bail-out propre si l'user
@@ -338,9 +399,7 @@ async function tryAutoInstallPython(): Promise<string | null> {
       )
       return null
     }
-    process.stderr.write(
-      `\n[fabi installer] Python 3.10+ requis. Tu as Homebrew, on peut l'installer maintenant.\n`,
-    )
+    process.stderr.write(`\n[fabi installer] Python 3.10+ requis. Tu as Homebrew, on peut l'installer maintenant.\n`)
     const ok = await confirm(`Installer python@3.12 via Homebrew ?`)
     if (!ok) return null
     process.stderr.write(`[fabi installer] brew install python@3.12 …\n`)
@@ -354,9 +413,7 @@ async function tryAutoInstallPython(): Promise<string | null> {
 
   // Linux : on ne fait rien d'automatique (sudo apt nécessaire), juste un message clair
   if (process.platform === "linux") {
-    process.stderr.write(
-      `\n[fabi installer] Python 3.10+ requis. Installe-le avec ton package manager :\n`,
-    )
+    process.stderr.write(`\n[fabi installer] Python 3.10+ requis. Installe-le avec ton package manager :\n`)
     process.stderr.write(`  Debian/Ubuntu : sudo apt install python3.12 python3.12-venv\n`)
     process.stderr.write(`  Fedora/RHEL   : sudo dnf install python3.12\n`)
     process.stderr.write(`  Arch          : sudo pacman -S python\n`)
@@ -370,9 +427,7 @@ async function tryAutoInstallPython(): Promise<string | null> {
 // Result type
 // ---------------------------------------------------------------------------
 
-export type InstallResult =
-  | { ok: true; binPath: string }
-  | { ok: false; reason: InstallFailReason; message: string }
+export type InstallResult = { ok: true; binPath: string } | { ok: false; reason: InstallFailReason; message: string }
 
 export type InstallFailReason =
   | "non-interactive"
@@ -380,6 +435,7 @@ export type InstallFailReason =
   | "python-missing"
   | "venv-failed"
   | "pip-failed"
+  | "source-mismatch"
   | "binary-not-found-after-install"
 
 // ---------------------------------------------------------------------------
@@ -409,10 +465,10 @@ async function confirm(question: string, defaultYes = true): Promise<boolean> {
  *   dir, donc un git pull suffit pour propager les patches Fabi)
  * - Si le binaire manque → prompt user → `python -m venv` puis `pip install`
  *
- * **Pourquoi le auto-pull** : sans ça, un user qui a installé Fabi avant un
- * patch du fork (ex: bump des limites worker `--max-num-tokens-per-batch`,
- * `--max-sequence-length`) tourne indéfiniment sur l'ancienne version et
- * voit des bugs déjà corrigés upstream du fork.
+ * **Pourquoi la synchronisation** : une installation existante doit rester
+ * alignée sur le SHA qualifié par le CLI courant. Une nouvelle qualification
+ * produit entraîne un nouveau pin et jamais une mise à jour implicite de
+ * branche mutable.
  *
  * Streame le progress de pip directement sur le terminal user.
  *
@@ -427,6 +483,17 @@ export async function tryInstallParallax(): Promise<InstallResult> {
   if (existsSync(binPath)) {
     const refresh = await refreshSourceClone()
     log.info("parallax already installed in managed venv", { binPath, refresh })
+    if (
+      isCommitSha(refresh.expectedRef) &&
+      refresh.localPath &&
+      !(await matchesCommit(refresh.localPath, refresh.expectedRef))
+    ) {
+      return {
+        ok: false,
+        reason: "source-mismatch",
+        message: `Le runtime Parallax géré ne pointe pas sur le commit qualifié ${refresh.expectedRef}.`,
+      }
+    }
     return { ok: true, binPath }
   }
 
@@ -490,12 +557,19 @@ export async function tryInstallParallax(): Promise<InstallResult> {
   mkdirSync(root, { recursive: true })
   if (source.cloneUrl) {
     if (existsSync(join(source.localPath, ".git"))) {
-      process.stderr.write(
-        `${info}[fabi installer]${reset} Mise à jour du clone Parallax existant…\n`,
-      )
-      const pullCode = await streamCmd("git", ["-C", source.localPath, "pull", "--ff-only"])
-      if (pullCode !== 0) {
-        process.stderr.write(`${dim}(git pull a échoué, on continue avec le clone existant)${reset}\n`)
+      process.stderr.write(`${info}[fabi installer]${reset} Mise à jour du clone Parallax existant…\n`)
+      const refresh = await refreshSourceClone()
+      if (refresh.skipReason) {
+        process.stderr.write(`${dim}(${refresh.skipReason}, on continue avec le clone existant)${reset}\n`)
+      }
+      if (isCommitSha(source.cloneRef)) {
+        if (!(await matchesCommit(source.localPath, source.cloneRef))) {
+          return {
+            ok: false,
+            reason: "pip-failed",
+            message: `Le clone Parallax existant ne peut pas être aligné sur le commit qualifié ${source.cloneRef}.`,
+          }
+        }
       }
     } else {
       process.stderr.write(
@@ -503,15 +577,23 @@ export async function tryInstallParallax(): Promise<InstallResult> {
           source.cloneRef ? `@${source.cloneRef}` : ""
         }…\n`,
       )
-      const cloneArgs = ["clone", "--depth=1"]
-      if (source.cloneRef) cloneArgs.push("--branch", source.cloneRef)
-      cloneArgs.push(source.cloneUrl, source.localPath)
-      const cloneCode = await streamCmd("git", cloneArgs)
-      if (cloneCode !== 0) {
-        return {
-          ok: false,
-          reason: "pip-failed",
-          message: `Échec git clone ${source.cloneUrl} (code ${cloneCode}). Vérifie ta connexion et que git est installé.`,
+      for (const args of managedCloneArgs(source)) {
+        const cloneCode = await streamCmd("git", args)
+        if (cloneCode !== 0) {
+          return {
+            ok: false,
+            reason: "pip-failed",
+            message: `Échec préparation git ${source.cloneUrl} (code ${cloneCode}). Vérifie ta connexion et que git est installé.`,
+          }
+        }
+      }
+      if (isCommitSha(source.cloneRef)) {
+        if (!(await matchesCommit(source.localPath, source.cloneRef))) {
+          return {
+            ok: false,
+            reason: "pip-failed",
+            message: `Le clone Parallax ne pointe pas sur le commit qualifié ${source.cloneRef}.`,
+          }
         }
       }
     }
@@ -538,9 +620,7 @@ export async function tryInstallParallax(): Promise<InstallResult> {
   // (le mode editable expose tous les sous-packages via .pth, contournant
   // le bug de packaging poetry-core upstream qui n'expose que `parallax/`).
   const editableSpec = extras ? `${source.localPath}[${extras}]` : source.localPath
-  process.stderr.write(
-    `\n${info}[fabi installer]${reset} pip install -e "${editableSpec}"…\n`,
-  )
+  process.stderr.write(`\n${info}[fabi installer]${reset} pip install -e "${editableSpec}"…\n`)
   process.stderr.write(`${dim}            Sois patient — PyTorch + MLX peuvent prendre plusieurs minutes.${reset}\n\n`)
   const installCode = await streamCmd(pip, ["install", "-e", editableSpec])
   if (installCode !== 0) {

@@ -1,0 +1,35 @@
+import { describe, expect, test } from "bun:test"
+import { managedCloneArgs, QUALIFIED_PARALLAX_COMMIT } from "./installer"
+
+describe("managed Parallax source", () => {
+  test("pins the runtime qualified by the swarm E2E", () => {
+    expect(QUALIFIED_PARALLAX_COMMIT).toBe("be90732e93e0de67a04de0827e37800050d0b900")
+  })
+
+  test("fetches an immutable commit without treating it as a branch", () => {
+    expect(
+      managedCloneArgs({
+        localPath: "/runtime/parallax-src",
+        cloneUrl: "https://github.com/Noagiannone03/swarm-engine.git",
+        cloneRef: QUALIFIED_PARALLAX_COMMIT,
+      }),
+    ).toEqual([
+      ["init", "/runtime/parallax-src"],
+      ["-C", "/runtime/parallax-src", "remote", "add", "origin", "https://github.com/Noagiannone03/swarm-engine.git"],
+      ["-C", "/runtime/parallax-src", "fetch", "--depth=1", "origin", QUALIFIED_PARALLAX_COMMIT],
+      ["-C", "/runtime/parallax-src", "checkout", "--detach", "FETCH_HEAD"],
+    ])
+  })
+
+  test("keeps explicit branch overrides available for development", () => {
+    expect(
+      managedCloneArgs({
+        localPath: "/runtime/parallax-src",
+        cloneUrl: "https://example.com/parallax.git",
+        cloneRef: "topic-branch",
+      }),
+    ).toEqual([
+      ["clone", "--depth=1", "--branch", "topic-branch", "https://example.com/parallax.git", "/runtime/parallax-src"],
+    ])
+  })
+})
