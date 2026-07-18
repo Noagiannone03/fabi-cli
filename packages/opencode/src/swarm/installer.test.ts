@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { managedCloneArgs, QUALIFIED_PARALLAX_COMMIT } from "./installer"
+import { managedCloneArgs, QUALIFIED_PARALLAX_COMMIT } from "./runtime-source"
 
 describe("managed Parallax source", () => {
   test("pins the runtime qualified by the swarm E2E", () => {
-    expect(QUALIFIED_PARALLAX_COMMIT).toBe("be90732e93e0de67a04de0827e37800050d0b900")
+    expect(QUALIFIED_PARALLAX_COMMIT).toBe("d77834bb27c276ee117b5c0753b4ad30ead01d43")
   })
 
   test("fetches an immutable commit without treating it as a branch", () => {

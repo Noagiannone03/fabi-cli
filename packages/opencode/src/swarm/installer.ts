@@ -29,6 +29,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import * as Log from "@opencode-ai/core/util/log"
 import * as UI from "../cli/ui"
+import { isCommitSha, managedCloneArgs, QUALIFIED_PARALLAX_COMMIT } from "./runtime-source"
 
 const log = Log.create({ service: "swarm.installer" })
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -161,34 +162,6 @@ interface SourceInfo {
 }
 
 const FORK_PARALLAX_GIT = "https://github.com/Noagiannone03/swarm-engine.git"
-export const QUALIFIED_PARALLAX_COMMIT = "be90732e93e0de67a04de0827e37800050d0b900"
-
-function isCommitSha(ref: string | null | undefined): ref is string {
-  return !!ref && /^[0-9a-f]{40}$/i.test(ref)
-}
-
-/**
- * Build the exact Git operations used for a cold managed checkout.
- *
- * `git clone --branch <sha>` does not accept commit SHAs. For immutable
- * runtime pins, initialise an empty repository and fetch only the qualified
- * reachable commit. Branch/tag overrides keep the ordinary shallow clone.
- */
-export function managedCloneArgs(source: Pick<SourceInfo, "localPath" | "cloneUrl" | "cloneRef">): string[][] {
-  if (!source.cloneUrl) return []
-  if (isCommitSha(source.cloneRef)) {
-    return [
-      ["init", source.localPath],
-      ["-C", source.localPath, "remote", "add", "origin", source.cloneUrl],
-      ["-C", source.localPath, "fetch", "--depth=1", "origin", source.cloneRef],
-      ["-C", source.localPath, "checkout", "--detach", "FETCH_HEAD"],
-    ]
-  }
-  const args = ["clone", "--depth=1"]
-  if (source.cloneRef) args.push("--branch", source.cloneRef)
-  args.push(source.cloneUrl, source.localPath)
-  return [args]
-}
 
 function resolveSource(): SourceInfo {
   // 1. Override explicite via env (path local OU URL git)
