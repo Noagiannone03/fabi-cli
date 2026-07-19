@@ -5,7 +5,7 @@ import { gpuBackendArgs, prefixCacheArgs, prefixCacheEnabled, resolveWorkerLimit
 
 const DEFAULTS = {
   maxBatchSize: "2",
-  maxSequenceLength: "65536",
+  maxSequenceLength: "32768",
   maxNumTokensPerBatch: "8192",
   kvBlockSize: "32",
 }
@@ -17,15 +17,15 @@ const hw = (over: Partial<HardwareProfile>): HardwareProfile => ({
 })
 
 describe("resolveWorkerLimits — Apple Silicon", () => {
-  test("≤24 GB unifié → batch=1, fenêtre 64k chunkée", () => {
+  test("≤24 GB unifié → batch=1, fenêtre 32k chunkée", () => {
     const l = resolveWorkerLimits(hw({ accelerator: "apple-silicon", ramGb: 16 }))
     expect(l.maxBatchSize).toBe("1")
-    expect(l.maxSequenceLength).toBe("65536")
+    expect(l.maxSequenceLength).toBe("32768")
   })
-  test("32 GB unifié → batch=1, fenêtre 64k", () => {
+  test("32 GB unifié → batch=1, fenêtre 32k", () => {
     const l = resolveWorkerLimits(hw({ accelerator: "apple-silicon", ramGb: 32 }))
     expect(l.maxBatchSize).toBe("1")
-    expect(l.maxSequenceLength).toBe("65536")
+    expect(l.maxSequenceLength).toBe("32768")
   })
   test("≥64 GB → defaults pleins", () => {
     expect(resolveWorkerLimits(hw({ accelerator: "apple-silicon", ramGb: 128 }))).toEqual(DEFAULTS)
@@ -33,24 +33,24 @@ describe("resolveWorkerLimits — Apple Silicon", () => {
 })
 
 describe("resolveWorkerLimits — CUDA (VRAM tiers)", () => {
-  test("8 GB (3060) → batch=1, fenêtre 64k chunkée, kv=16", () => {
+  test("8 GB (3060) → batch=1, fenêtre 32k chunkée, kv=16", () => {
     const l = resolveWorkerLimits(hw({ accelerator: "cuda", vramGb: 8 }))
-    expect(l).toEqual({ maxBatchSize: "1", maxSequenceLength: "65536", maxNumTokensPerBatch: "4096", kvBlockSize: "16" })
+    expect(l).toEqual({ maxBatchSize: "1", maxSequenceLength: "32768", maxNumTokensPerBatch: "4096", kvBlockSize: "16" })
   })
-  test("12 GB → batch=1, fenêtre 64k chunkée", () => {
+  test("12 GB → batch=1, fenêtre 32k chunkée", () => {
     const l = resolveWorkerLimits(hw({ accelerator: "cuda", vramGb: 12 }))
     expect(l.maxBatchSize).toBe("1")
-    expect(l.maxSequenceLength).toBe("65536")
+    expect(l.maxSequenceLength).toBe("32768")
   })
-  test("16 GB → batch=1, fenêtre 64k", () => {
+  test("16 GB → batch=1, fenêtre 32k", () => {
     const l = resolveWorkerLimits(hw({ accelerator: "cuda", vramGb: 16 }))
     expect(l.maxBatchSize).toBe("1")
-    expect(l.maxSequenceLength).toBe("65536")
+    expect(l.maxSequenceLength).toBe("32768")
   })
-  test("20 GB (4080) → batch=1, fenêtre 64k", () => {
+  test("20 GB (4080) → batch=1, fenêtre 32k", () => {
     const l = resolveWorkerLimits(hw({ accelerator: "cuda", vramGb: 20 }))
     expect(l.maxBatchSize).toBe("1")
-    expect(l.maxSequenceLength).toBe("65536")
+    expect(l.maxSequenceLength).toBe("32768")
   })
   test("24 GB (3090/4090) → defaults pleins", () => {
     expect(resolveWorkerLimits(hw({ accelerator: "cuda", vramGb: 24 }))).toEqual(DEFAULTS)

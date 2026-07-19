@@ -46,7 +46,7 @@ function buildSwarmConfigModel(swarm: RegistrySwarm) {
   const modelID = swarm.model.trim()
   const context = swarm.maxContextTokens && swarm.maxContextTokens > 0
     ? swarm.maxContextTokens
-    : 65536
+    : 32768
   return {
     id: modelID,
     name: (modelID.split("/").pop() ?? modelID) + " via " + swarm.name,

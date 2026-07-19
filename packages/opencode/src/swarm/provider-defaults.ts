@@ -17,7 +17,7 @@ export interface SwarmProviderOverrides {
   schedulerUrl?: string
   /** ID du modèle exposé par le scheduler. */
   modelId?: string
-  /** Fenêtre publiée par le registry; 64k tant qu'elle est inconnue. */
+  /** Fenêtre publiée par le registry; 32k qualifiés tant qu'elle est inconnue. */
   maxContextTokens?: number
 }
 
@@ -32,7 +32,7 @@ export function buildSwarmProvider(overrides: SwarmProviderOverrides = {}) {
   const modelId = overrides.modelId ?? SWARM_DEFAULTS.model
   const context = overrides.maxContextTokens && overrides.maxContextTokens > 0
     ? overrides.maxContextTokens
-    : 65536
+    : 32768
 
   return {
     id: SWARM_PROVIDER_ID,

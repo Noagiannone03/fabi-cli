@@ -60,7 +60,7 @@ export interface HardwareProfile {
 // CLI : prompts >4k tokens fréquents, peu de concurrence parallèle.
 const FABI_DEFAULT_LIMITS: WorkerLimits = {
   maxBatchSize: "2",
-  maxSequenceLength: "65536",
+  maxSequenceLength: "32768",
   maxNumTokensPerBatch: "8192",
   kvBlockSize: "32",
 }
@@ -82,9 +82,9 @@ export function resolveWorkerLimits(hw: HardwareProfile): WorkerLimits {
     // Mémoire unifiée : à batch=8 / seq=32768 on flingue 16 GB unifiés au
     // premier prefill (RAM OS + browser sur le même pool).
     if (hw.ramGb <= 24) {
-      return { maxBatchSize: "1", maxSequenceLength: "65536", maxNumTokensPerBatch: "4096", kvBlockSize: "32" }
+      return { maxBatchSize: "1", maxSequenceLength: "32768", maxNumTokensPerBatch: "4096", kvBlockSize: "32" }
     }
-    return { maxBatchSize: "1", maxSequenceLength: "65536", maxNumTokensPerBatch: "8192", kvBlockSize: "32" }
+    return { maxBatchSize: "1", maxSequenceLength: "32768", maxNumTokensPerBatch: "8192", kvBlockSize: "32" }
   }
 
   if (hw.accelerator === "cuda" && hw.vramGb !== undefined) {
@@ -96,19 +96,19 @@ export function resolveWorkerLimits(hw: HardwareProfile): WorkerLimits {
     const vram = Math.round(hw.vramGb)
     if (vram <= 8) {
       // 3050/4050 laptop, 3060 8 GB : le strict minimum jouable.
-      return { maxBatchSize: "1", maxSequenceLength: "65536", maxNumTokensPerBatch: "4096", kvBlockSize: "16" }
+      return { maxBatchSize: "1", maxSequenceLength: "32768", maxNumTokensPerBatch: "4096", kvBlockSize: "16" }
     }
     if (vram <= 12) {
       // 3060 12 GB, 4070.
-      return { maxBatchSize: "1", maxSequenceLength: "65536", maxNumTokensPerBatch: "4096", kvBlockSize: "32" }
+      return { maxBatchSize: "1", maxSequenceLength: "32768", maxNumTokensPerBatch: "4096", kvBlockSize: "32" }
     }
     if (vram <= 16) {
       // 4060 Ti 16 GB, 4070 Ti SUPER.
-      return { maxBatchSize: "1", maxSequenceLength: "65536", maxNumTokensPerBatch: "8192", kvBlockSize: "32" }
+      return { maxBatchSize: "1", maxSequenceLength: "32768", maxNumTokensPerBatch: "8192", kvBlockSize: "32" }
     }
     if (vram < 24) {
       // 3080 20 GB / cartes 20-23 GB.
-      return { maxBatchSize: "1", maxSequenceLength: "65536", maxNumTokensPerBatch: "8192", kvBlockSize: "32" }
+      return { maxBatchSize: "1", maxSequenceLength: "32768", maxNumTokensPerBatch: "8192", kvBlockSize: "32" }
     }
   }
 
