@@ -5,7 +5,9 @@ import {
   gpuBackendArgs,
   prefixCacheArgs,
   prefixCacheEnabled,
-  resolveAppleSystemReserveGb,
+  resolveCudaSystemReserveGb,
+  resolveHostSystemReserveGb,
+  resolveMemoryReserveEnv,
   resolveWorkerLimits,
   type HardwareProfile,
 } from "./worker"
@@ -39,22 +41,49 @@ describe("resolveWorkerLimits — Apple Silicon", () => {
   })
 })
 
-describe("resolveAppleSystemReserveGb", () => {
-  test("keeps enough desktop headroom on a 16 GB Mac", () => {
-    expect(resolveAppleSystemReserveGb(16)).toBe(6)
+describe("resolveHostSystemReserveGb", () => {
+  test("keeps enough desktop headroom on a 16 GB machine", () => {
+    expect(resolveHostSystemReserveGb(16)).toBe(6)
   })
 
-  test("scales with unified memory without reserving it unboundedly", () => {
-    expect(resolveAppleSystemReserveGb(32)).toBe(8)
-    expect(resolveAppleSystemReserveGb(48)).toBe(12)
-    expect(resolveAppleSystemReserveGb(128)).toBe(12)
+  test("scales with host memory without reserving it unboundedly", () => {
+    expect(resolveHostSystemReserveGb(32)).toBe(8)
+    expect(resolveHostSystemReserveGb(48)).toBe(12)
+    expect(resolveHostSystemReserveGb(128)).toBe(12)
+  })
+})
+
+describe("resolveMemoryReserveEnv", () => {
+  test("applies the same host policy to Apple, Windows CUDA and Linux workers", () => {
+    expect(resolveMemoryReserveEnv(hw({ accelerator: "apple-silicon", ramGb: 16 }))).toEqual({
+      PARALLAX_SYSTEM_RESERVE_GB: "6",
+    })
+    expect(resolveMemoryReserveEnv(hw({ accelerator: "generic", ramGb: 32 }))).toEqual({
+      PARALLAX_SYSTEM_RESERVE_GB: "8",
+    })
+    expect(resolveMemoryReserveEnv(hw({ accelerator: "cuda", ramGb: 32, vramGb: 16 }))).toEqual({
+      PARALLAX_SYSTEM_RESERVE_GB: "8",
+      PARALLAX_CUDA_SYSTEM_RESERVE_GB: "1.5",
+    })
+  })
+
+  test("keeps extra display VRAM on constrained consumer GPUs", () => {
+    expect(resolveCudaSystemReserveGb(8)).toBe(2)
+    expect(resolveCudaSystemReserveGb(12)).toBe(2)
+    expect(resolveCudaSystemReserveGb(16)).toBe(1.5)
+    expect(resolveCudaSystemReserveGb(24)).toBe(1.5)
   })
 })
 
 describe("resolveWorkerLimits — CUDA (VRAM tiers)", () => {
   test("8 GB (3060) → batch=1, fenêtre 32k chunkée, kv=16", () => {
     const l = resolveWorkerLimits(hw({ accelerator: "cuda", vramGb: 8 }))
-    expect(l).toEqual({ maxBatchSize: "1", maxSequenceLength: "32768", maxNumTokensPerBatch: "4096", kvBlockSize: "16" })
+    expect(l).toEqual({
+      maxBatchSize: "1",
+      maxSequenceLength: "32768",
+      maxNumTokensPerBatch: "4096",
+      kvBlockSize: "16",
+    })
   })
   test("12 GB → batch=1, fenêtre 32k chunkée", () => {
     const l = resolveWorkerLimits(hw({ accelerator: "cuda", vramGb: 12 }))

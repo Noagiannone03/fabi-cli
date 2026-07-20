@@ -57,17 +57,36 @@ export interface HardwareProfile {
 }
 
 /**
- * Minimum unified memory kept for macOS and foreground applications.
+ * Minimum host RAM kept for the OS and foreground applications.
  *
  * This is a floor, not the worker allocation: the engine also samples live
  * `available` memory before loading anything.  Keeping the policy pure here
- * makes packaged workers and tests agree while still allowing an explicit env
- * override.  The cap avoids wasting large-memory machines; the 6 GB minimum
- * is what keeps a 16 GB development Mac responsive under normal IDE/browser
- * load.
+ * makes packaged workers and tests agree across macOS, Windows and Linux while
+ * still allowing an explicit env override. The engine combines this policy
+ * with psutil's live `available` counter; this value is never treated as the
+ * amount a worker should allocate.
  */
-export function resolveAppleSystemReserveGb(ramGb: number): number {
+export function resolveHostSystemReserveGb(ramGb: number): number {
   return Math.min(12, Math.max(6, Math.ceil(Math.max(0, ramGb) * 0.25)))
+}
+
+/** Dedicated VRAM kept for the display driver and other GPU applications. */
+export function resolveCudaSystemReserveGb(vramGb: number): number {
+  return Math.round(Math.max(0, vramGb)) <= 12 ? 2 : 1.5
+}
+
+/** Pure cross-platform policy applied only when the user did not override it. */
+export function resolveMemoryReserveEnv(hw: HardwareProfile): Record<string, string> {
+  const result = {
+    PARALLAX_SYSTEM_RESERVE_GB: String(resolveHostSystemReserveGb(hw.ramGb)),
+  }
+  if (hw.accelerator === "cuda" && hw.vramGb !== undefined) {
+    return {
+      ...result,
+      PARALLAX_CUDA_SYSTEM_RESERVE_GB: String(resolveCudaSystemReserveGb(hw.vramGb)),
+    }
+  }
+  return result
 }
 
 // Defaults Fabi (validés dans le fork patch 545a902). Conviennent à un agentic
@@ -136,11 +155,10 @@ export function resolveWorkerLimits(hw: HardwareProfile): WorkerLimits {
  * absent ou n'a rien retourné d'exploitable.
  */
 function detectCudaVramGb(): number | undefined {
-  const r = spawnSync(
-    "nvidia-smi",
-    ["--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-    { encoding: "utf8", timeout: 5000 },
-  )
+  const r = spawnSync("nvidia-smi", ["--query-gpu=memory.total", "--format=csv,noheader,nounits"], {
+    encoding: "utf8",
+    timeout: 5000,
+  })
   if (r.status !== 0 || !r.stdout) return undefined
   const mibValues = r.stdout
     .split(/\r?\n/)
@@ -177,15 +195,10 @@ function pickWorkerLimits(): WorkerLimits {
 
   // L'user peut tout overrider via env (la TUI ou un script wrapper).
   return {
-    maxBatchSize:
-      process.env.PARALLAX_MAX_BATCH_SIZE?.trim() || limits.maxBatchSize,
-    maxSequenceLength:
-      process.env.PARALLAX_MAX_SEQUENCE_LENGTH?.trim() || limits.maxSequenceLength,
-    maxNumTokensPerBatch:
-      process.env.PARALLAX_MAX_NUM_TOKENS_PER_BATCH?.trim() ||
-      limits.maxNumTokensPerBatch,
-    kvBlockSize:
-      process.env.PARALLAX_KV_BLOCK_SIZE?.trim() || limits.kvBlockSize,
+    maxBatchSize: process.env.PARALLAX_MAX_BATCH_SIZE?.trim() || limits.maxBatchSize,
+    maxSequenceLength: process.env.PARALLAX_MAX_SEQUENCE_LENGTH?.trim() || limits.maxSequenceLength,
+    maxNumTokensPerBatch: process.env.PARALLAX_MAX_NUM_TOKENS_PER_BATCH?.trim() || limits.maxNumTokensPerBatch,
+    kvBlockSize: process.env.PARALLAX_KV_BLOCK_SIZE?.trim() || limits.kvBlockSize,
   }
 }
 
@@ -211,20 +224,11 @@ function buildWorkerEnv(): NodeJS.ProcessEnv {
   // A stable peer id restores the shard; this per-process epoch fences stale RPCs.
   env.FABI_WORKER_SESSION_ID = randomUUID()
 
-  if (hw.accelerator === "apple-silicon") {
-    // Réserve RAM système pour ne pas évincer l'OS sur mémoire unifiée.
-    // Le moteur combine cette réserve avec la mémoire réellement disponible,
-    // puis surveille la pression avec hystérésis pendant toute la génération.
-    setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", String(resolveAppleSystemReserveGb(hw.ramGb)))
-    return env
-  }
-
-  if (hw.accelerator === "cuda" && hw.vramGb !== undefined && Math.round(hw.vramGb) < 24) {
-    // Workstation-safe : sur une carte consumer qui pilote aussi l'affichage,
-    // on garde plus de marge que le défaut 1.5 GB de cuda_memory.py pour que le
-    // desktop/browser ne se fassent pas évincer quand leur usage VRAM grandit
-    // en cours de session. Lu par resolve_cuda_memory_budget côté moteur.
-    setIfUnset("PARALLAX_CUDA_SYSTEM_RESERVE_GB", Math.round(hw.vramGb) <= 12 ? "2" : "1.5")
+  // The engine samples host RAM on every OS and VRAM on every CUDA device.
+  // Keep the product policy in one pure function, while preserving explicit
+  // user/admin overrides from the process environment.
+  for (const [key, value] of Object.entries(resolveMemoryReserveEnv(hw))) {
+    setIfUnset(key, value)
   }
   return env
 }
@@ -409,11 +413,7 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
   // des heures à se demander pourquoi il a des bugs déjà corrigés. Le
   // refresh paresseux du clone se fait dans installer.ts ; ici on lit juste
   // l'état pour le rendre visible.
-  const fabiRuntimeRoot = join(
-    process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"),
-    "fabi",
-    "runtime",
-  )
+  const fabiRuntimeRoot = join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "fabi", "runtime")
   const isManagedBin = bin.startsWith(fabiRuntimeRoot)
   const sourceState = await inspectManagedSource().catch(() => null)
   log.info("spawning parallax worker", {
@@ -445,15 +445,23 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
     "-s",
     schedulerPeer,
     "-r",
-    "--max-batch-size", limits.maxBatchSize,
-    "--max-sequence-length", limits.maxSequenceLength,
-    "--max-num-tokens-per-batch", limits.maxNumTokensPerBatch,
-    "--kv-block-size", limits.kvBlockSize,
+    "--max-batch-size",
+    limits.maxBatchSize,
+    "--max-sequence-length",
+    limits.maxSequenceLength,
+    "--max-num-tokens-per-batch",
+    limits.maxNumTokensPerBatch,
+    "--kv-block-size",
+    limits.kvBlockSize,
   ]
   const prefixCache = prefixCacheEnabled()
   args.push(...prefixCacheArgs(prefixCache))
   args.push(...gpuBackendArgs())
-  log.info("worker limits resolved", { limits, prefixCache, gpuBackend: process.platform === "win32" ? "vllm" : "default" })
+  log.info("worker limits resolved", {
+    limits,
+    prefixCache,
+    gpuBackend: process.platform === "win32" ? "vllm" : "default",
+  })
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   let stopped = false
   let child: ChildProcess | null = null
