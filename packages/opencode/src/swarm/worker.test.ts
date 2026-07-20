@@ -1,7 +1,14 @@
 // Tests sur le tiering mémoire des limites worker (fonction pure, sans hardware).
 
 import { afterEach, describe, expect, test } from "bun:test"
-import { gpuBackendArgs, prefixCacheArgs, prefixCacheEnabled, resolveWorkerLimits, type HardwareProfile } from "./worker"
+import {
+  gpuBackendArgs,
+  prefixCacheArgs,
+  prefixCacheEnabled,
+  resolveAppleSystemReserveGb,
+  resolveWorkerLimits,
+  type HardwareProfile,
+} from "./worker"
 
 const DEFAULTS = {
   maxBatchSize: "2",
@@ -29,6 +36,18 @@ describe("resolveWorkerLimits — Apple Silicon", () => {
   })
   test("≥64 GB → defaults pleins", () => {
     expect(resolveWorkerLimits(hw({ accelerator: "apple-silicon", ramGb: 128 }))).toEqual(DEFAULTS)
+  })
+})
+
+describe("resolveAppleSystemReserveGb", () => {
+  test("keeps enough desktop headroom on a 16 GB Mac", () => {
+    expect(resolveAppleSystemReserveGb(16)).toBe(6)
+  })
+
+  test("scales with unified memory without reserving it unboundedly", () => {
+    expect(resolveAppleSystemReserveGb(32)).toBe(8)
+    expect(resolveAppleSystemReserveGb(48)).toBe(12)
+    expect(resolveAppleSystemReserveGb(128)).toBe(12)
   })
 })
 

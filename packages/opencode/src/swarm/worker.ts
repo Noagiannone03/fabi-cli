@@ -56,6 +56,20 @@ export interface HardwareProfile {
   vramGb?: number
 }
 
+/**
+ * Minimum unified memory kept for macOS and foreground applications.
+ *
+ * This is a floor, not the worker allocation: the engine also samples live
+ * `available` memory before loading anything.  Keeping the policy pure here
+ * makes packaged workers and tests agree while still allowing an explicit env
+ * override.  The cap avoids wasting large-memory machines; the 6 GB minimum
+ * is what keeps a 16 GB development Mac responsive under normal IDE/browser
+ * load.
+ */
+export function resolveAppleSystemReserveGb(ramGb: number): number {
+  return Math.min(12, Math.max(6, Math.ceil(Math.max(0, ramGb) * 0.25)))
+}
+
 // Defaults Fabi (validés dans le fork patch 545a902). Conviennent à un agentic
 // CLI : prompts >4k tokens fréquents, peu de concurrence parallèle.
 const FABI_DEFAULT_LIMITS: WorkerLimits = {
@@ -197,9 +211,11 @@ function buildWorkerEnv(): NodeJS.ProcessEnv {
   // A stable peer id restores the shard; this per-process epoch fences stale RPCs.
   env.FABI_WORKER_SESSION_ID = randomUUID()
 
-  if (hw.accelerator === "apple-silicon" && hw.ramGb < 64) {
+  if (hw.accelerator === "apple-silicon") {
     // Réserve RAM système pour ne pas évincer l'OS sur mémoire unifiée.
-    setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", hw.ramGb <= 24 ? "4" : "6")
+    // Le moteur combine cette réserve avec la mémoire réellement disponible,
+    // puis surveille la pression avec hystérésis pendant toute la génération.
+    setIfUnset("PARALLAX_SYSTEM_RESERVE_GB", String(resolveAppleSystemReserveGb(hw.ramGb)))
     return env
   }
 
