@@ -57,17 +57,16 @@ export interface HardwareProfile {
 }
 
 /**
- * Minimum host RAM kept for the OS and foreground applications.
+ * Legacy indicative host RAM reserve.
  *
- * This is a floor, not the worker allocation: the engine also samples live
- * `available` memory before loading anything.  Keeping the policy pure here
- * makes packaged workers and tests agree across macOS, Windows and Linux while
- * still allowing an explicit env override. The engine combines this policy
- * with psutil's live `available` counter; this value is never treated as the
- * amount a worker should allocate.
+ * The qualified runtime now computes the real host reserve from psutil's live
+ * `available` counter at startup.  Keep this pure helper for UI/tests and older
+ * callers, but do not inject PARALLAX_SYSTEM_RESERVE_GB by default: doing so
+ * would freeze an arbitrary reserve and bypass the adaptive runtime policy.
  */
 export function resolveHostSystemReserveGb(ramGb: number): number {
-  return Math.min(12, Math.max(6, Math.ceil(Math.max(0, ramGb) * 0.25)))
+  const total = Math.max(0, ramGb)
+  return Math.min(12, Math.max(2, Number((total * 0.20).toFixed(1))))
 }
 
 /** Dedicated VRAM kept for the display driver and other GPU applications. */
@@ -75,18 +74,14 @@ export function resolveCudaSystemReserveGb(vramGb: number): number {
   return Math.round(Math.max(0, vramGb)) <= 12 ? 2 : 1.5
 }
 
-/** Pure cross-platform policy applied only when the user did not override it. */
+/** Worker memory env. Host RAM reserve is owned by the runtime's adaptive policy. */
 export function resolveMemoryReserveEnv(hw: HardwareProfile): Record<string, string> {
-  const result = {
-    PARALLAX_SYSTEM_RESERVE_GB: String(resolveHostSystemReserveGb(hw.ramGb)),
-  }
   if (hw.accelerator === "cuda" && hw.vramGb !== undefined) {
     return {
-      ...result,
       PARALLAX_CUDA_SYSTEM_RESERVE_GB: String(resolveCudaSystemReserveGb(hw.vramGb)),
     }
   }
-  return result
+  return {}
 }
 
 // Defaults Fabi (validés dans le fork patch 545a902). Conviennent à un agentic
@@ -224,9 +219,10 @@ function buildWorkerEnv(): NodeJS.ProcessEnv {
   // A stable peer id restores the shard; this per-process epoch fences stale RPCs.
   env.FABI_WORKER_SESSION_ID = randomUUID()
 
-  // The engine samples host RAM on every OS and VRAM on every CUDA device.
-  // Keep the product policy in one pure function, while preserving explicit
-  // user/admin overrides from the process environment.
+  // The engine samples host RAM on every OS and computes an adaptive reserve
+  // from psutil.available. Only pass explicit device VRAM reserves here; a
+  // user/admin PARALLAX_SYSTEM_RESERVE_GB inherited from the shell is still
+  // preserved by setIfUnset/process.env.
   for (const [key, value] of Object.entries(resolveMemoryReserveEnv(hw))) {
     setIfUnset(key, value)
   }

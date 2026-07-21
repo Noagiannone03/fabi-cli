@@ -42,27 +42,22 @@ describe("resolveWorkerLimits — Apple Silicon", () => {
 })
 
 describe("resolveHostSystemReserveGb", () => {
-  test("keeps enough desktop headroom on a 16 GB machine", () => {
-    expect(resolveHostSystemReserveGb(16)).toBe(6)
+  test("uses an indicative adaptive-runtime baseline, not the old fixed 6 GB floor", () => {
+    expect(resolveHostSystemReserveGb(16)).toBe(3.2)
   })
 
   test("scales with host memory without reserving it unboundedly", () => {
-    expect(resolveHostSystemReserveGb(32)).toBe(8)
-    expect(resolveHostSystemReserveGb(48)).toBe(12)
+    expect(resolveHostSystemReserveGb(32)).toBe(6.4)
+    expect(resolveHostSystemReserveGb(48)).toBe(9.6)
     expect(resolveHostSystemReserveGb(128)).toBe(12)
   })
 })
 
 describe("resolveMemoryReserveEnv", () => {
-  test("applies the same host policy to Apple, Windows CUDA and Linux workers", () => {
-    expect(resolveMemoryReserveEnv(hw({ accelerator: "apple-silicon", ramGb: 16 }))).toEqual({
-      PARALLAX_SYSTEM_RESERVE_GB: "6",
-    })
-    expect(resolveMemoryReserveEnv(hw({ accelerator: "generic", ramGb: 32 }))).toEqual({
-      PARALLAX_SYSTEM_RESERVE_GB: "8",
-    })
+  test("lets the runtime own adaptive host RAM policy on Apple, Windows and Linux", () => {
+    expect(resolveMemoryReserveEnv(hw({ accelerator: "apple-silicon", ramGb: 16 }))).toEqual({})
+    expect(resolveMemoryReserveEnv(hw({ accelerator: "generic", ramGb: 32 }))).toEqual({})
     expect(resolveMemoryReserveEnv(hw({ accelerator: "cuda", ramGb: 32, vramGb: 16 }))).toEqual({
-      PARALLAX_SYSTEM_RESERVE_GB: "8",
       PARALLAX_CUDA_SYSTEM_RESERVE_GB: "1.5",
     })
   })
