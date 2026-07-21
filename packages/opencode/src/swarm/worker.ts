@@ -66,7 +66,9 @@ export interface HardwareProfile {
  */
 export function resolveHostSystemReserveGb(ramGb: number): number {
   const total = Math.max(0, ramGb)
-  return Math.min(12, Math.max(2, Number((total * 0.20).toFixed(1))))
+  if (total <= 10) return 1.25
+  if (total <= 20) return 2
+  return Math.min(8, Math.max(3, Number((total * 0.10).toFixed(1))))
 }
 
 /** Dedicated VRAM kept for the display driver and other GPU applications. */

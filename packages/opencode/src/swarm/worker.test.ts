@@ -43,13 +43,14 @@ describe("resolveWorkerLimits — Apple Silicon", () => {
 
 describe("resolveHostSystemReserveGb", () => {
   test("uses an indicative adaptive-runtime baseline, not the old fixed 6 GB floor", () => {
-    expect(resolveHostSystemReserveGb(16)).toBe(3.2)
+    expect(resolveHostSystemReserveGb(8)).toBe(1.25)
+    expect(resolveHostSystemReserveGb(16)).toBe(2)
   })
 
   test("scales with host memory without reserving it unboundedly", () => {
-    expect(resolveHostSystemReserveGb(32)).toBe(6.4)
-    expect(resolveHostSystemReserveGb(48)).toBe(9.6)
-    expect(resolveHostSystemReserveGb(128)).toBe(12)
+    expect(resolveHostSystemReserveGb(32)).toBe(3.2)
+    expect(resolveHostSystemReserveGb(48)).toBe(4.8)
+    expect(resolveHostSystemReserveGb(128)).toBe(8)
   })
 })
 
