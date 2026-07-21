@@ -220,6 +220,9 @@ function buildWorkerEnv(): NodeJS.ProcessEnv {
   )
   // A stable peer id restores the shard; this per-process epoch fences stale RPCs.
   env.FABI_WORKER_SESSION_ID = randomUUID()
+  // Official vLLM setting. Cold multi-GB model downloads can legitimately
+  // exceed its 600 s default; executor failures still terminate immediately.
+  setIfUnset("VLLM_ENGINE_READY_TIMEOUT_S", "3600")
 
   // The engine samples host RAM on every OS and computes an adaptive reserve
   // from psutil.available. Only pass explicit device VRAM reserves here; a
