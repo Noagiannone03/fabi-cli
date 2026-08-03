@@ -57,32 +57,14 @@ export interface HardwareProfile {
 }
 
 /**
- * Legacy indicative host RAM reserve.
+ * Do not turn a hardware class into a fixed memory reserve.
  *
- * The qualified runtime now computes the real host reserve from psutil's live
- * `available` counter at startup.  Keep this pure helper for UI/tests and older
- * callers, but do not inject PARALLAX_SYSTEM_RESERVE_GB by default: doing so
- * would freeze an arbitrary reserve and bypass the adaptive runtime policy.
+ * The initialized engine owns admission on every OS: MLX uses live host
+ * availability and its recommended working-set cap; CUDA uses cudaMemGetInfo
+ * followed by the vLLM/SGLang runtime profiler. Explicit operator overrides
+ * already present in process.env remain untouched by buildWorkerEnv.
  */
-export function resolveHostSystemReserveGb(ramGb: number): number {
-  const total = Math.max(0, ramGb)
-  if (total <= 10) return 1.25
-  if (total <= 20) return 2
-  return Math.min(8, Math.max(3, Number((total * 0.10).toFixed(1))))
-}
-
-/** Dedicated VRAM kept for the display driver and other GPU applications. */
-export function resolveCudaSystemReserveGb(vramGb: number): number {
-  return Math.round(Math.max(0, vramGb)) <= 12 ? 2 : 1.5
-}
-
-/** Worker memory env. Host RAM reserve is owned by the runtime's adaptive policy. */
-export function resolveMemoryReserveEnv(hw: HardwareProfile): Record<string, string> {
-  if (hw.accelerator === "cuda" && hw.vramGb !== undefined) {
-    return {
-      PARALLAX_CUDA_SYSTEM_RESERVE_GB: String(resolveCudaSystemReserveGb(hw.vramGb)),
-    }
-  }
+export function resolveMemoryReserveEnv(_hw: HardwareProfile): Record<string, string> {
   return {}
 }
 
@@ -224,10 +206,8 @@ function buildWorkerEnv(): NodeJS.ProcessEnv {
   // exceed its 600 s default; executor failures still terminate immediately.
   setIfUnset("VLLM_ENGINE_READY_TIMEOUT_S", "3600")
 
-  // The engine samples host RAM on every OS and computes an adaptive reserve
-  // from psutil.available. Only pass explicit device VRAM reserves here; a
-  // user/admin PARALLAX_SYSTEM_RESERVE_GB inherited from the shell is still
-  // preserved by setIfUnset/process.env.
+  // The initialized engine owns live RAM/VRAM admission on every OS. Explicit
+  // operator overrides inherited from the shell remain present in `env`.
   for (const [key, value] of Object.entries(resolveMemoryReserveEnv(hw))) {
     setIfUnset(key, value)
   }

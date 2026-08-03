@@ -5,8 +5,6 @@ import {
   gpuBackendArgs,
   prefixCacheArgs,
   prefixCacheEnabled,
-  resolveCudaSystemReserveGb,
-  resolveHostSystemReserveGb,
   resolveMemoryReserveEnv,
   resolveWorkerLimits,
   type HardwareProfile,
@@ -41,33 +39,12 @@ describe("resolveWorkerLimits — Apple Silicon", () => {
   })
 })
 
-describe("resolveHostSystemReserveGb", () => {
-  test("uses an indicative adaptive-runtime baseline, not the old fixed 6 GB floor", () => {
-    expect(resolveHostSystemReserveGb(8)).toBe(1.25)
-    expect(resolveHostSystemReserveGb(16)).toBe(2)
-  })
-
-  test("scales with host memory without reserving it unboundedly", () => {
-    expect(resolveHostSystemReserveGb(32)).toBe(3.2)
-    expect(resolveHostSystemReserveGb(48)).toBe(4.8)
-    expect(resolveHostSystemReserveGb(128)).toBe(8)
-  })
-})
-
 describe("resolveMemoryReserveEnv", () => {
-  test("lets the runtime own adaptive host RAM policy on Apple, Windows and Linux", () => {
+  test("lets the initialized runtime own RAM and VRAM admission on every OS", () => {
     expect(resolveMemoryReserveEnv(hw({ accelerator: "apple-silicon", ramGb: 16 }))).toEqual({})
     expect(resolveMemoryReserveEnv(hw({ accelerator: "generic", ramGb: 32 }))).toEqual({})
-    expect(resolveMemoryReserveEnv(hw({ accelerator: "cuda", ramGb: 32, vramGb: 16 }))).toEqual({
-      PARALLAX_CUDA_SYSTEM_RESERVE_GB: "1.5",
-    })
-  })
-
-  test("keeps extra display VRAM on constrained consumer GPUs", () => {
-    expect(resolveCudaSystemReserveGb(8)).toBe(2)
-    expect(resolveCudaSystemReserveGb(12)).toBe(2)
-    expect(resolveCudaSystemReserveGb(16)).toBe(1.5)
-    expect(resolveCudaSystemReserveGb(24)).toBe(1.5)
+    expect(resolveMemoryReserveEnv(hw({ accelerator: "cuda", ramGb: 32, vramGb: 8 }))).toEqual({})
+    expect(resolveMemoryReserveEnv(hw({ accelerator: "cuda", ramGb: 32, vramGb: 16 }))).toEqual({})
   })
 })
 
