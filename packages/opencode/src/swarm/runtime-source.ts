@@ -1,4 +1,4 @@
-export const QUALIFIED_PARALLAX_COMMIT = "623f17745426fa564b4f47574eece834d3c2e76b"
+export const QUALIFIED_PARALLAX_COMMIT = "faa90ad90900b04377056153498af021d49b9e82"
 
 export function isCommitSha(ref: string | null | undefined): ref is string {
   return !!ref && /^[0-9a-f]{40}$/i.test(ref)
