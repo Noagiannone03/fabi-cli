@@ -7,9 +7,9 @@
 // préférence illisible ne doit jamais empêcher fabi de démarrer).
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { homedir } from "node:os"
 import { join } from "node:path"
 import * as Log from "@opencode-ai/core/util/log"
+import { fabiDataRoot } from "./paths"
 
 const log = Log.create({ service: "swarm.preference" })
 
@@ -21,8 +21,7 @@ export interface SwarmPreference {
 }
 
 function prefDir(): string {
-  const root = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share")
-  return join(root, "fabi")
+  return fabiDataRoot()
 }
 
 function prefPath(): string {

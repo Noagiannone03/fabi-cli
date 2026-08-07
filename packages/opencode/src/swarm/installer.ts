@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url"
 import * as Log from "@opencode-ai/core/util/log"
 import * as UI from "../cli/ui"
 import { isCommitSha, managedCloneArgs, QUALIFIED_PARALLAX_COMMIT } from "./runtime-source"
+import { fabiRuntimeRoot } from "./paths"
 
 const log = Log.create({ service: "swarm.installer" })
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -40,8 +41,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 
 /** Racine de l'install Parallax géré par Fabi. */
 function installRoot(): string {
-  const data = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share")
-  return join(data, "fabi", "runtime")
+  return fabiRuntimeRoot()
 }
 
 /** Nom du venv créé par l'installer interactif (fallback). */

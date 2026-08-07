@@ -6,14 +6,15 @@
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { existsSync } from "node:fs"
-import { homedir, totalmem } from "node:os"
+import { existsSync, readFileSync } from "node:fs"
+import { totalmem } from "node:os"
 import { join } from "node:path"
 import * as Log from "@opencode-ai/core/util/log"
 import { getAccountToken } from "./account-token"
 import { SWARM_DEFAULTS } from "./defaults"
 import { FabiEventStream } from "./events"
 import { inspectManagedSource } from "./installer"
+import { fabiDataRoot, fabiRuntimeRoot } from "./paths"
 
 const log = Log.create({ service: "swarm.worker" })
 const RESTART_DELAY_MS = 30_000
@@ -44,9 +45,10 @@ interface WorkerLimits {
  *  - `apple-silicon` : mémoire unifiée partagée (Metal sur la RAM OS).
  *  - `cuda` : VRAM dédiée NVIDIA (natif Linux OU Windows via WSL — dans les
  *    deux cas `process.platform === "linux"` et `nvidia-smi` est présent).
+ *  - `directml` : GPU DirectX 12 Windows, mesuré ensuite par DXGI/ORT.
  *  - `generic` : CPU / GPU non détecté → defaults prudents Fabi.
  */
-export type Accelerator = "apple-silicon" | "cuda" | "generic"
+export type Accelerator = "apple-silicon" | "cuda" | "directml" | "generic"
 
 export interface HardwareProfile {
   accelerator: Accelerator
@@ -124,6 +126,13 @@ export function resolveWorkerLimits(hw: HardwareProfile): WorkerLimits {
     }
   }
 
+  if (hw.accelerator === "directml") {
+    // DirectML owns one sequential ORT session per worker. Exact memory and
+    // context admission come from DXGI plus the initialized executor, so the
+    // CLI only limits concurrency and prefill burst size here.
+    return { maxBatchSize: "1", maxSequenceLength: "32768", maxNumTokensPerBatch: "4096", kvBlockSize: "32" }
+  }
+
   return { ...FABI_DEFAULT_LIMITS }
 }
 
@@ -156,6 +165,7 @@ function detectHardware(): HardwareProfile {
   // Natif Linux+NVIDIA ET Windows→WSL CUDA exposent tous deux nvidia-smi.
   const vramGb = detectCudaVramGb()
   if (vramGb !== undefined) return { accelerator: "cuda", ramGb, vramGb }
+  if (process.platform === "win32") return { accelerator: "directml", ramGb }
   return { accelerator: "generic", ramGb }
 }
 
@@ -196,10 +206,7 @@ function buildWorkerEnv(): NodeJS.ProcessEnv {
   // débloque la consommation (« tu contribues = tu consommes »). Même fichier
   // que l'apiKey du provider → un seul compte CLI+IDE.
   setIfUnset("FABI_ACCOUNT_TOKEN", getAccountToken())
-  setIfUnset(
-    "PARALLAX_KEY_PATH",
-    join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "fabi", "identity"),
-  )
+  setIfUnset("PARALLAX_KEY_PATH", join(fabiDataRoot(), "identity"))
   // A stable peer id restores the shard; this per-process epoch fences stale RPCs.
   env.FABI_WORKER_SESSION_ID = randomUUID()
   // Official vLLM setting. Cold multi-GB model downloads can legitimately
@@ -236,11 +243,36 @@ export function prefixCacheArgs(enabled = prefixCacheEnabled()): string[] {
 }
 
 /** Select the GPU runtime that is actually bundled for the host platform. */
-export function gpuBackendArgs(platform: NodeJS.Platform = process.platform): string[] {
-  // The native Windows runtime ships vLLM-Windows; SGLang is not supported by
-  // that package. Keep the choice explicit so Parallax never falls back to its
-  // Linux-oriented default on Windows.
-  return platform === "win32" ? ["--gpu-backend", "vllm"] : []
+export function gpuBackendArgs(
+  platform: NodeJS.Platform = process.platform,
+  accelerator: Accelerator = getHardware().accelerator,
+  packagedAccelerator: string | null = null,
+): string[] {
+  if (platform !== "win32") return []
+  const effectiveAccelerator =
+    packagedAccelerator === "cuda" || packagedAccelerator === "directml" ? packagedAccelerator : accelerator
+  // NVIDIA keeps the qualified native vLLM path. Every other Windows GPU uses
+  // the cross-vendor ORT package selected by the DirectML release asset. The
+  // installed package manifest wins over probing: an operator may deliberately
+  // install DirectML on an NVIDIA host, and that asset does not contain vLLM.
+  return ["--gpu-backend", effectiveAccelerator === "directml" ? "onnxruntime" : "vllm"]
+}
+
+export function parseManagedRuntimeAccelerator(manifest: string): "cuda" | "directml" | null {
+  for (const rawLine of manifest.split(/\r?\n/)) {
+    const match = /^accel=(cuda|directml)\s*$/i.exec(rawLine.trim())
+    const accelerator = match?.[1]?.toLowerCase()
+    if (accelerator === "cuda" || accelerator === "directml") return accelerator
+  }
+  return null
+}
+
+function readManagedRuntimeAccelerator(): "cuda" | "directml" | null {
+  try {
+    return parseManagedRuntimeAccelerator(readFileSync(join(fabiDataRoot(), "MANIFEST"), "utf8"))
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -355,15 +387,15 @@ async function findParallaxBin(override?: string): Promise<string | null> {
 
 function findManagedBin(): string | null {
   const binary = process.platform === "win32" ? "parallax.exe" : "parallax"
-  const dataRoot = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share")
+  const runtimeRoot = fabiRuntimeRoot()
   const venvBinDir = process.platform === "win32" ? "Scripts" : "bin"
   const candidates = [
     // Runtime bundlé dans les tarballs Fabi (priorité prod).
-    join(dataRoot, "fabi", "runtime", "parallax-venv", venvBinDir, binary),
+    join(runtimeRoot, "parallax-venv", venvBinDir, binary),
     // Install via fabi-installer (venv dans ~/.local/share/fabi/runtime/.venv/)
-    join(dataRoot, "fabi", "runtime", ".venv", venvBinDir, binary),
+    join(runtimeRoot, ".venv", venvBinDir, binary),
     // Legacy : binaire posé directement dans runtime/ (par un installer custom)
-    join(dataRoot, "fabi", "runtime", binary),
+    join(runtimeRoot, binary),
   ]
   for (const p of candidates) {
     if (existsSync(p)) return p
@@ -394,8 +426,8 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
   // des heures à se demander pourquoi il a des bugs déjà corrigés. Le
   // refresh paresseux du clone se fait dans installer.ts ; ici on lit juste
   // l'état pour le rendre visible.
-  const fabiRuntimeRoot = join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "fabi", "runtime")
-  const isManagedBin = bin.startsWith(fabiRuntimeRoot)
+  const managedRuntimeRoot = fabiRuntimeRoot()
+  const isManagedBin = bin.startsWith(managedRuntimeRoot)
   const sourceState = await inspectManagedSource().catch(() => null)
   log.info("spawning parallax worker", {
     bin,
@@ -406,7 +438,7 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
   if (!isManagedBin) {
     log.warn(
       "parallax bin is OUTSIDE the fabi-managed runtime — patches Fabi (heartbeat, scheduler cancel-fix) absent. Worker limits are still passed via CLI args, so batch/seq sizing remains correct.",
-      { bin, expectedRoot: fabiRuntimeRoot },
+      { bin, expectedRoot: managedRuntimeRoot },
     )
   }
 
@@ -437,11 +469,15 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
   ]
   const prefixCache = prefixCacheEnabled()
   args.push(...prefixCacheArgs(prefixCache))
-  args.push(...gpuBackendArgs())
+  const accelerator = getHardware().accelerator
+  const packagedAccelerator = isManagedBin ? readManagedRuntimeAccelerator() : null
+  const backendArgs = gpuBackendArgs(process.platform, accelerator, packagedAccelerator)
+  args.push(...backendArgs)
   log.info("worker limits resolved", {
     limits,
     prefixCache,
-    gpuBackend: process.platform === "win32" ? "vllm" : "default",
+    gpuBackend: backendArgs.at(-1) ?? "default",
+    packagedAccelerator,
   })
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   let stopped = false

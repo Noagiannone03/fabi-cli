@@ -5,6 +5,7 @@ import {
   gpuBackendArgs,
   prefixCacheArgs,
   prefixCacheEnabled,
+  parseManagedRuntimeAccelerator,
   resolveMemoryReserveEnv,
   resolveWorkerLimits,
   type HardwareProfile,
@@ -90,6 +91,17 @@ describe("resolveWorkerLimits — generic / CPU", () => {
   })
 })
 
+describe("resolveWorkerLimits — DirectML", () => {
+  test("keeps one sequential session while runtime measures real DXGI capacity", () => {
+    expect(resolveWorkerLimits(hw({ accelerator: "directml", ramGb: 16 }))).toEqual({
+      maxBatchSize: "1",
+      maxSequenceLength: "32768",
+      maxNumTokensPerBatch: "4096",
+      kvBlockSize: "32",
+    })
+  })
+})
+
 describe("prefixCacheEnabled — opt-out env", () => {
   const original = process.env.FABI_PREFIX_CACHE
   afterEach(() => {
@@ -123,11 +135,34 @@ describe("prefixCacheArgs — Parallax CLI contract", () => {
 
 describe("gpuBackendArgs — platform runtime contract", () => {
   test("selects the bundled vLLM runtime on native Windows", () => {
-    expect(gpuBackendArgs("win32")).toEqual(["--gpu-backend", "vllm"])
+    expect(gpuBackendArgs("win32", "cuda")).toEqual(["--gpu-backend", "vllm"])
+  })
+
+  test("selects the portable ONNX runtime on cross-vendor Windows", () => {
+    expect(gpuBackendArgs("win32", "directml")).toEqual(["--gpu-backend", "onnxruntime"])
+  })
+
+  test("lets the installed package override hardware probing", () => {
+    expect(gpuBackendArgs("win32", "cuda", "directml")).toEqual(["--gpu-backend", "onnxruntime"])
+    expect(gpuBackendArgs("win32", "directml", "cuda")).toEqual(["--gpu-backend", "vllm"])
   })
 
   test("keeps the platform default on Unix workers", () => {
-    expect(gpuBackendArgs("darwin")).toEqual([])
-    expect(gpuBackendArgs("linux")).toEqual([])
+    expect(gpuBackendArgs("darwin", "apple-silicon")).toEqual([])
+    expect(gpuBackendArgs("linux", "cuda")).toEqual([])
+  })
+})
+
+describe("parseManagedRuntimeAccelerator", () => {
+  test("reads the accelerator from a release manifest", () => {
+    expect(parseManagedRuntimeAccelerator("fabi v2.7.0-rc49\r\ntarget=bun-windows-x64\r\naccel=directml\r\n")).toBe(
+      "directml",
+    )
+    expect(parseManagedRuntimeAccelerator("fabi v2.7.0-rc49\naccel=cuda\n")).toBe("cuda")
+  })
+
+  test("rejects absent and unsupported accelerator values", () => {
+    expect(parseManagedRuntimeAccelerator("fabi dev\naccel=cpu\n")).toBeNull()
+    expect(parseManagedRuntimeAccelerator("fabi dev\n")).toBeNull()
   })
 })
