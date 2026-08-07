@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import {
   gpuBackendArgs,
+  parseManagedRuntimeManifest,
   prefixCacheArgs,
   prefixCacheEnabled,
   parseManagedRuntimeAccelerator,
@@ -143,8 +144,27 @@ describe("gpuBackendArgs — platform runtime contract", () => {
   })
 
   test("lets the installed package override hardware probing", () => {
-    expect(gpuBackendArgs("win32", "cuda", "directml")).toEqual(["--gpu-backend", "onnxruntime"])
-    expect(gpuBackendArgs("win32", "directml", "cuda")).toEqual(["--gpu-backend", "vllm"])
+    expect(gpuBackendArgs("win32", "cuda", { accelerator: "directml", engine: null, executionDevice: null })).toEqual([
+      "--gpu-backend",
+      "onnxruntime",
+    ])
+    expect(gpuBackendArgs("win32", "directml", { accelerator: "cuda", engine: null, executionDevice: null })).toEqual([
+      "--gpu-backend",
+      "vllm",
+    ])
+  })
+
+  test("uses the signed Skippy engine and exact packaged device on every OS", () => {
+    expect(
+      gpuBackendArgs("darwin", "apple-silicon", { accelerator: "mlx", engine: "skippy", executionDevice: "metal" }),
+    ).toEqual(["--gpu-backend", "skippy", "--execution-device", "metal"])
+    expect(
+      gpuBackendArgs("win32", "directml", {
+        accelerator: "directml",
+        engine: "skippy",
+        executionDevice: "vulkan",
+      }),
+    ).toEqual(["--gpu-backend", "skippy", "--execution-device", "vulkan"])
   })
 
   test("keeps the platform default on Unix workers", () => {
@@ -159,6 +179,14 @@ describe("parseManagedRuntimeAccelerator", () => {
       "directml",
     )
     expect(parseManagedRuntimeAccelerator("fabi v2.7.0-rc49\naccel=cuda\n")).toBe("cuda")
+  })
+
+  test("reads the complete authenticated Skippy execution profile", () => {
+    expect(
+      parseManagedRuntimeManifest(
+        "fabi v2.7.0-rc49\r\naccel=directml\r\nexecution_engine=skippy\r\nexecution_device=vulkan\r\n",
+      ),
+    ).toEqual({ accelerator: "directml", engine: "skippy", executionDevice: "vulkan" })
   })
 
   test("rejects absent and unsupported accelerator values", () => {

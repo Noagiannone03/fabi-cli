@@ -242,13 +242,26 @@ export function prefixCacheArgs(enabled = prefixCacheEnabled()): string[] {
   return enabled ? [] : ["--disable-prefix-cache"]
 }
 
-/** Select the GPU runtime that is actually bundled for the host platform. */
+export interface ManagedRuntimeProfile {
+  accelerator: string | null
+  engine: "skippy" | null
+  executionDevice: "cpu" | "cuda" | "metal" | "rocm" | "vulkan" | null
+}
+
+/** Select the execution engine that is actually authenticated in the product archive. */
 export function gpuBackendArgs(
   platform: NodeJS.Platform = process.platform,
   accelerator: Accelerator = getHardware().accelerator,
-  packagedAccelerator: string | null = null,
+  packagedRuntime: ManagedRuntimeProfile | null = null,
 ): string[] {
+  if (packagedRuntime?.engine === "skippy") {
+    if (!packagedRuntime.executionDevice) {
+      throw new Error("Le runtime Fabi Skippy ne déclare aucun périphérique d'exécution qualifié.")
+    }
+    return ["--gpu-backend", "skippy", "--execution-device", packagedRuntime.executionDevice]
+  }
   if (platform !== "win32") return []
+  const packagedAccelerator = packagedRuntime?.accelerator
   const effectiveAccelerator =
     packagedAccelerator === "cuda" || packagedAccelerator === "directml" ? packagedAccelerator : accelerator
   // NVIDIA keeps the qualified native vLLM path. Every other Windows GPU uses
@@ -258,18 +271,42 @@ export function gpuBackendArgs(
   return ["--gpu-backend", effectiveAccelerator === "directml" ? "onnxruntime" : "vllm"]
 }
 
-export function parseManagedRuntimeAccelerator(manifest: string): "cuda" | "directml" | null {
+export function parseManagedRuntimeManifest(manifest: string): ManagedRuntimeProfile {
+  const fields = new Map<string, string>()
   for (const rawLine of manifest.split(/\r?\n/)) {
-    const match = /^accel=(cuda|directml)\s*$/i.exec(rawLine.trim())
-    const accelerator = match?.[1]?.toLowerCase()
-    if (accelerator === "cuda" || accelerator === "directml") return accelerator
+    const separator = rawLine.indexOf("=")
+    if (separator <= 0) continue
+    fields.set(
+      rawLine.slice(0, separator).trim().toLowerCase(),
+      rawLine
+        .slice(separator + 1)
+        .trim()
+        .toLowerCase(),
+    )
   }
-  return null
+  const accelerator = fields.get("accel") || null
+  const rawEngine = fields.get("execution_engine")
+  const engine = rawEngine === "skippy" ? rawEngine : null
+  const rawDevice = fields.get("execution_device")
+  const executionDevice =
+    rawDevice === "cpu" ||
+    rawDevice === "cuda" ||
+    rawDevice === "metal" ||
+    rawDevice === "rocm" ||
+    rawDevice === "vulkan"
+      ? rawDevice
+      : null
+  return { accelerator, engine, executionDevice }
 }
 
-function readManagedRuntimeAccelerator(): "cuda" | "directml" | null {
+export function parseManagedRuntimeAccelerator(manifest: string): "cuda" | "directml" | null {
+  const accelerator = parseManagedRuntimeManifest(manifest).accelerator
+  return accelerator === "cuda" || accelerator === "directml" ? accelerator : null
+}
+
+function readManagedRuntimeProfile(): ManagedRuntimeProfile | null {
   try {
-    return parseManagedRuntimeAccelerator(readFileSync(join(fabiDataRoot(), "MANIFEST"), "utf8"))
+    return parseManagedRuntimeManifest(readFileSync(join(fabiDataRoot(), "MANIFEST"), "utf8"))
   } catch {
     return null
   }
@@ -470,14 +507,15 @@ export async function spawnWorker(opts: SpawnWorkerOptions): Promise<WorkerHandl
   const prefixCache = prefixCacheEnabled()
   args.push(...prefixCacheArgs(prefixCache))
   const accelerator = getHardware().accelerator
-  const packagedAccelerator = isManagedBin ? readManagedRuntimeAccelerator() : null
-  const backendArgs = gpuBackendArgs(process.platform, accelerator, packagedAccelerator)
+  const packagedRuntime = isManagedBin ? readManagedRuntimeProfile() : null
+  const backendArgs = gpuBackendArgs(process.platform, accelerator, packagedRuntime)
   args.push(...backendArgs)
   log.info("worker limits resolved", {
     limits,
     prefixCache,
-    gpuBackend: backendArgs.at(-1) ?? "default",
-    packagedAccelerator,
+    gpuBackend: backendArgs[1] ?? "default",
+    executionDevice: packagedRuntime?.executionDevice ?? "auto",
+    packagedAccelerator: packagedRuntime?.accelerator ?? null,
   })
   const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   let stopped = false
