@@ -3,7 +3,7 @@ import { managedCloneArgs, QUALIFIED_PARALLAX_COMMIT } from "./runtime-source"
 
 describe("managed Parallax source", () => {
   test("pins the runtime qualified by the swarm E2E", () => {
-    expect(QUALIFIED_PARALLAX_COMMIT).toBe("58560058a91669ab9b035ccf748b62daebfa169d")
+    expect(QUALIFIED_PARALLAX_COMMIT).toBe("7296313eade6cde5ac80c878770f604910256143")
   })
 
   test("fetches an immutable commit without treating it as a branch", () => {
