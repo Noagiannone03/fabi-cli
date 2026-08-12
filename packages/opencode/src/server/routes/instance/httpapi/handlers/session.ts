@@ -37,6 +37,7 @@ import {
   SummarizePayload,
   UpdatePayload,
 } from "../groups/session"
+import { Plugin } from "@/plugin"
 
 const mapNotFound = <A, E, R>(self: Effect.Effect<A, E, R>) =>
   self.pipe(
@@ -59,6 +60,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
     const summary = yield* SessionSummary.Service
+    const plugin = yield* Plugin.Service
     const bus = yield* Bus.Service
     const scope = yield* Scope.Scope
 
@@ -80,6 +82,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
     const get = Effect.fn("SessionHttpApi.get")(function* (ctx: { params: { sessionID: SessionID } }) {
       return yield* mapNotFound(session.get(ctx.params.sessionID))
+    })
+
+    const goal = Effect.fn("SessionHttpApi.goal")(function* (ctx: { params: { sessionID: SessionID } }) {
+      return yield* plugin.goalStatus(ctx.params.sessionID)
+    })
+
+    const pauseGoal = Effect.fn("SessionHttpApi.pauseGoal")(function* (ctx: { params: { sessionID: SessionID } }) {
+      return yield* plugin.pauseGoal(ctx.params.sessionID)
     })
 
     const children = Effect.fn("SessionHttpApi.children")(function* (ctx: { params: { sessionID: SessionID } }) {
@@ -361,6 +371,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     return handlers
       .handle("list", list)
       .handle("status", status)
+      .handle("goal", goal)
+      .handle("pauseGoal", pauseGoal)
       .handle("get", get)
       .handle("children", children)
       .handle("todo", todo)

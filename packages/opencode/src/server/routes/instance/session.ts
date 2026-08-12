@@ -27,6 +27,7 @@ import { zodObject } from "@/util/effect-zod"
 import { Bus } from "@/bus"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { jsonRequest, runRequest } from "./trace"
+import { Plugin } from "@/plugin"
 
 const log = Log.create({ service: "server" })
 
@@ -118,6 +119,61 @@ export const SessionRoutes = lazy(() =>
         jsonRequest("SessionRoutes.status", c, function* () {
           const svc = yield* SessionStatus.Service
           return Object.fromEntries(yield* svc.list())
+        }),
+    )
+    .get(
+      "/:sessionID/goal",
+      describeRoute({
+        summary: "Get Fabi goal",
+        description: "Retrieve the qualified long-running Goal state for a session.",
+        operationId: "session.goal",
+        responses: {
+          200: {
+            description: "Current goal or null",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z
+                    .object({
+                      objective: z.string().optional(),
+                      status: z.enum(["active", "paused", "budgetLimited", "usageLimited", "complete", "unmet"]),
+                      tokensUsed: z.number().optional(),
+                      tokenBudget: z.number().nullable().optional(),
+                      autoTurns: z.number().optional(),
+                      maxAutoTurns: z.number().nullable().optional(),
+                      wrapupSent: z.boolean().optional(),
+                    })
+                    .nullable(),
+                ),
+              },
+            },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator("param", z.object({ sessionID: SessionID.zod })),
+      async (c) =>
+        jsonRequest("SessionRoutes.goal", c, function* () {
+          const plugin = yield* Plugin.Service
+          return yield* plugin.goalStatus(c.req.valid("param").sessionID)
+        }),
+    )
+    .post(
+      "/:sessionID/goal/pause",
+      describeRoute({
+        summary: "Pause Fabi goal",
+        description: "Pause Goal continuation before aborting the current OpenCode turn.",
+        operationId: "session.goal.pause",
+        responses: {
+          200: { description: "Paused goal" },
+          ...errors(400, 404),
+        },
+      }),
+      validator("param", z.object({ sessionID: SessionID.zod })),
+      async (c) =>
+        jsonRequest("SessionRoutes.pauseGoal", c, function* () {
+          const plugin = yield* Plugin.Service
+          return yield* plugin.pauseGoal(c.req.valid("param").sessionID)
         }),
     )
     .get(

@@ -148,6 +148,25 @@ afterEach(async () => {
 
 describe("session HttpApi", () => {
   it.live(
+    "loads the qualified Goal plugin in pure-compatible server routes",
+    withTmp({ git: true, config: { formatter: false, lsp: false } }, (tmp) =>
+      Effect.gen(function* () {
+        const session = yield* createSession(tmp.path, { title: "goal" })
+        const route = pathFor(SessionPaths.goal, { sessionID: session.id })
+        const headers = { "x-opencode-directory": tmp.path }
+
+        const legacy = yield* requestWithBackend(false, route, { headers })
+        const effect = yield* requestWithBackend(true, route, { headers })
+
+        expect(legacy.status).toBe(200)
+        expect(effect.status).toBe(200)
+        expect(yield* json<unknown>(legacy)).toBeNull()
+        expect(yield* json<unknown>(effect)).toBeNull()
+      }),
+    ),
+  )
+
+  it.live(
     "serves read routes through Hono bridge",
     withTmp({ git: true, config: { formatter: false, lsp: false } }, (tmp) =>
       Effect.gen(function* () {

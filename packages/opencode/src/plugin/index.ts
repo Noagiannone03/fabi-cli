@@ -27,11 +27,20 @@ import { PluginLoader } from "./loader"
 import { parsePluginSpecifier, readPluginId, readV1Plugin, resolvePluginId } from "./shared"
 import { registerAdapter } from "@/control-plane/adapters"
 import type { WorkspaceAdapter } from "@/control-plane/types"
+import {
+  Event as FabiGoalEvent,
+  FabiGoalPlugin,
+  type Info as FabiGoalInfo,
+  isGoalIdleEvent,
+  Lifecycle as FabiGoalLifecycle,
+  type LifecycleHooks,
+  sessionIDFromGoalEvent,
+} from "./fabi-goal"
 
 const log = Log.create({ service: "plugin" })
 
 type State = {
-  hooks: Hooks[]
+  hooks: LifecycleHooks[]
 }
 
 // Hook names that follow the (input, output) => Promise<void> trigger pattern
@@ -50,6 +59,8 @@ export interface Interface {
     output: Output,
   ) => Effect.Effect<Output>
   readonly list: () => Effect.Effect<Hooks[]>
+  readonly goalStatus: (sessionID: string) => Effect.Effect<FabiGoalInfo | null>
+  readonly pauseGoal: (sessionID: string) => Effect.Effect<FabiGoalInfo>
   readonly init: () => Effect.Effect<void>
 }
 
@@ -64,6 +75,7 @@ const INTERNAL_PLUGINS: PluginInstance[] = [
   CloudflareWorkersAuthPlugin,
   CloudflareAIGatewayAuthPlugin,
   AzureAuthPlugin,
+  FabiGoalPlugin,
 ]
 
 function isServerPlugin(value: unknown): value is PluginInstance {
@@ -113,7 +125,7 @@ export const layer = Layer.effect(
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
-        const hooks: Hooks[] = []
+        const hooks: LifecycleHooks[] = []
         const bridge = yield* EffectBridge.make()
 
         function publishPluginError(message: string) {
@@ -229,6 +241,17 @@ export const layer = Layer.effect(
           )
         }
 
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(async () => {
+            await Promise.allSettled(
+              hooks
+                .toReversed()
+                .filter((hook) => typeof hook.dispose === "function")
+                .map((hook) => Promise.resolve(hook.dispose?.())),
+            )
+          }),
+        )
+
         // Notify plugins of current config
         for (const hook of hooks) {
           yield* Effect.tryPromise({
@@ -241,11 +264,44 @@ export const layer = Layer.effect(
 
         // Subscribe to bus events, fiber interrupted when scope closes
         yield* bus.subscribeAll().pipe(
-          Stream.runForEach((input) =>
-            Effect.sync(() => {
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
               for (const hook of hooks) {
-                void hook["event"]?.({ event: input as any })
+                const callback = hook.event
+                if (!callback) continue
+                const invoked = Effect.tryPromise({
+                  try: () => callback({ event: event as any }),
+                  catch: (error) => error,
+                }).pipe(
+                  Effect.catch((error) =>
+                    Effect.sync(() => log.error("plugin event hook failed", { event: event.type, error })),
+                  ),
+                )
+                if (hook[FabiGoalLifecycle]) {
+                  yield* invoked
+                } else {
+                  yield* invoked.pipe(Effect.forkScoped)
+                }
               }
+
+              if (!isGoalIdleEvent(event)) return
+              const sessionID = sessionIDFromGoalEvent(event)
+              if (!sessionID) return
+              const lifecycle = hooks.find((hook) => hook[FabiGoalLifecycle])?.[FabiGoalLifecycle]
+              if (!lifecycle) return
+              const decision = lifecycle.takeIdleDecision(sessionID)
+              const goal = yield* Effect.tryPromise(() => lifecycle.status(sessionID)).pipe(Effect.option)
+              if (goal._tag === "None") return
+              yield* bus.publish(FabiGoalEvent.Status, {
+                sessionID,
+                status: goal.value?.status ?? null,
+                ...(goal.value?.objective ? { objective: goal.value.objective } : {}),
+                ...(typeof goal.value?.tokensUsed === "number" ? { tokensUsed: goal.value.tokensUsed } : {}),
+                ...(goal.value?.tokenBudget !== undefined ? { tokenBudget: goal.value.tokenBudget } : {}),
+                ...(typeof goal.value?.autoTurns === "number" ? { autoTurns: goal.value.autoTurns } : {}),
+                ...(goal.value?.maxAutoTurns !== undefined ? { maxAutoTurns: goal.value.maxAutoTurns } : {}),
+                ...(decision ? { decision } : {}),
+              })
             }),
           ),
           Effect.forkScoped,
@@ -275,11 +331,25 @@ export const layer = Layer.effect(
       return s.hooks
     })
 
+    const goalStatus = Effect.fn("Plugin.goalStatus")(function* (sessionID: string) {
+      const s = yield* InstanceState.get(state)
+      const lifecycle = s.hooks.find((hook) => hook[FabiGoalLifecycle])?.[FabiGoalLifecycle]
+      if (!lifecycle) return null
+      return yield* Effect.promise(() => lifecycle.status(sessionID))
+    })
+
+    const pauseGoal = Effect.fn("Plugin.pauseGoal")(function* (sessionID: string) {
+      const s = yield* InstanceState.get(state)
+      const lifecycle = s.hooks.find((hook) => hook[FabiGoalLifecycle])?.[FabiGoalLifecycle]
+      if (!lifecycle) return yield* Effect.die(new Error("qualified Goal plugin lifecycle is unavailable"))
+      return yield* Effect.promise(() => lifecycle.setStatus(sessionID, "paused"))
+    })
+
     const init = Effect.fn("Plugin.init")(function* () {
       yield* InstanceState.get(state)
     })
 
-    return Service.of({ trigger, list, init })
+    return Service.of({ trigger, list, goalStatus, pauseGoal, init })
   }),
 )
 

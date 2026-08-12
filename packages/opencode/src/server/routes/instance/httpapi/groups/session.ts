@@ -16,6 +16,7 @@ import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import { WorkspaceRoutingMiddleware } from "../middleware/workspace-routing"
 import { described } from "./metadata"
+import { Info as FabiGoalInfo } from "@/plugin/fabi-goal"
 
 const root = "/session"
 const QueryBoolean = Schema.Literals(["true", "false"]).pipe(
@@ -70,6 +71,8 @@ export const PermissionResponsePayload = Schema.Struct({
 export const SessionPaths = {
   list: root,
   status: `${root}/status`,
+  goal: `${root}/:sessionID/goal`,
+  pauseGoal: `${root}/:sessionID/goal/pause`,
   get: `${root}/:sessionID`,
   children: `${root}/:sessionID/children`,
   todo: `${root}/:sessionID/todo`,
@@ -118,6 +121,28 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.status",
             summary: "Get session status",
             description: "Retrieve the current status of all sessions, including active, idle, and completed states.",
+          }),
+        ),
+        HttpApiEndpoint.get("goal", SessionPaths.goal, {
+          params: { sessionID: SessionID },
+          success: described(Schema.NullOr(FabiGoalInfo), "Current Fabi goal or null"),
+          error: [HttpApiError.BadRequest, HttpApiError.NotFound],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.goal",
+            summary: "Get Fabi goal",
+            description: "Retrieve the qualified long-running Goal state for a session.",
+          }),
+        ),
+        HttpApiEndpoint.post("pauseGoal", SessionPaths.pauseGoal, {
+          params: { sessionID: SessionID },
+          success: described(FabiGoalInfo, "Paused Fabi goal"),
+          error: [HttpApiError.BadRequest, HttpApiError.NotFound],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.goal.pause",
+            summary: "Pause Fabi goal",
+            description: "Pause Goal continuation before aborting the current OpenCode turn.",
           }),
         ),
         HttpApiEndpoint.get("get", SessionPaths.get, {

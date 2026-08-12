@@ -103,14 +103,14 @@ export const layer = Layer.effect(
       for (const [name, command] of Object.entries(cfg.command ?? {})) {
         commands[name] = {
           name,
-          agent: command.agent,
-          model: command.model,
+          ...(command.agent ? { agent: command.agent } : {}),
+          ...(command.model ? { model: command.model } : {}),
           description: command.description,
           source: "command",
           get template() {
             return command.template
           },
-          subtask: command.subtask,
+          ...(command.subtask === undefined ? {} : { subtask: command.subtask }),
           hints: hints(command.template),
         }
       }

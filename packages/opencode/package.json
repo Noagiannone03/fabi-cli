@@ -128,6 +128,7 @@
     "@opentui/solid": "catalog:",
     "@parcel/watcher": "2.5.1",
     "@pierre/diffs": "catalog:",
+    "@prevalentware/opencode-goal-plugin": "0.1.31",
     "@solid-primitives/event-bus": "1.1.2",
     "@solid-primitives/scheduled": "1.5.2",
     "@standard-schema/spec": "1.0.0",

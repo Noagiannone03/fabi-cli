@@ -676,11 +676,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         messageID: assistantMessage.id,
       }))
 
-      yield* plugin.trigger(
-        "tool.execute.after",
-        { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs },
-        result,
-      )
+      // The plugin contract requires a completed tool output. A failed Task
+      // has no result and is already represented by the error ToolPart above;
+      // publishing an `after` hook with undefined breaks conforming plugins
+      // such as Goal's child-task tracker.
+      if (result) {
+        yield* plugin.trigger(
+          "tool.execute.after",
+          { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs },
+          result,
+        )
+      }
 
       assistantMessage.finish = "tool-calls"
       assistantMessage.time.completed = Date.now()
